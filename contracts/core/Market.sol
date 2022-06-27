@@ -6,9 +6,10 @@ import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
+import "@openzeppelin/contracts/security/Pausable.sol";
 import "../interfaces/IMarket.sol";
 
-contract Market is Ownable, ReentrancyGuard, IMarket {
+contract Market is Ownable, ReentrancyGuard, Pausable, IMarket {
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
 
@@ -38,7 +39,7 @@ contract Market is Ownable, ReentrancyGuard, IMarket {
     }
     /* ========== ADDRESSES ========== */
 
-    address public dollar;
+    address public collateral;
     address public vault;
 
     /* ========== STATE VARIABLES ========== */
@@ -58,10 +59,9 @@ contract Market is Ownable, ReentrancyGuard, IMarket {
 
     // fees
     uint256 public depositFee = 5000; // 6 decimals of precision
-    uint256 public minExecutionFee = 4000 wei;
+    uint256 public minExecutionFee = 4000 wei; // fee to execute position requests
 
     // delay
-    uint256 public maxBlockDelay;
     uint256 public maxTimeDelay;
 
     /* ========== MODIFIERS ========== */
@@ -73,20 +73,12 @@ contract Market is Ownable, ReentrancyGuard, IMarket {
 
     /* ========== CONSTRUCTORS ========== */
 
-    constructor(address _dollar, address _vault) {
-        dollar = _dollar;
+    constructor(address _collateral, address _vault) {
+        collateral = _collateral;
         vault = _vault;
     }
 
     /* ========== VIEWS ========== */
-
-    function getRequestKey(address _account, uint256 _index)
-        public
-        pure
-        returns (bytes32)
-    {
-        return keccak256(abi.encodePacked(_account, _index));
-    }
 
     /* ========== RESTRICTED FUNCTIONS ========== */
 
@@ -105,6 +97,14 @@ contract Market is Ownable, ReentrancyGuard, IMarket {
         emit SetMaxTimeDelay(_maxTimeDelay);
     }
 
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    function unpause() external onlyOwner {
+        _unpause();
+    }
+
     /* ========== MUTATIVE FUNCTIONS ========== */
 
     /// @notice Create increase position request
@@ -121,7 +121,7 @@ contract Market is Ownable, ReentrancyGuard, IMarket {
         uint256 _sizeDelta,
         bool _isLong,
         uint256 _acceptablePrice
-    ) external payable nonReentrant {
+    ) external payable nonReentrant whenNotPaused {
         uint256 _executionFee = msg.value;
         require(
             _executionFee >= minExecutionFee,
@@ -147,10 +147,11 @@ contract Market is Ownable, ReentrancyGuard, IMarket {
             _executionFee,
             block.timestamp
         );
-        bytes32 key = getRequestKey(_account, index);
+        bytes32 key = keccak256(abi.encodePacked(_account, index));
         increasePositionRequests[key] = request;
 
         emit CreateIncreasePosition(
+            key,
             _account,
             _indexToken,
             _amountIn,
@@ -164,20 +165,21 @@ contract Market is Ownable, ReentrancyGuard, IMarket {
         );
     }
 
-    function executeIncreasePosition(bytes32 _key) public nonReentrant {
+    function executeIncreasePosition(bytes32 _key)
+        public
+        nonReentrant
+        onlyExecutors
+    {
         IncreasePositionRequest memory request = increasePositionRequests[_key];
         if (request.account == address(0)) {
             return;
         }
-        if (request.blockTime.add(maxTimeDelay) <= block.timestamp) {
-            revert("Market::_validateExecution Request has expired");
-        }
-        bool allowed = msg.sender == request.account || executors[msg.sender];
-        if (!allowed) {
-            revert("Market::_validateExecution Forbidden");
-        }
+        require(
+            request.blockTime.add(maxTimeDelay) > block.timestamp,
+            "Market::executeIncreasePosition Request has expired"
+        );
         delete increasePositionRequests[_key];
-        IERC20(dollar).safeTransfer(vault, request.amountIn);
+        IERC20(collateral).safeTransfer(vault, request.amountIn);
     }
 
     /* ========== INTERNAL FUNCTIONS ========== */
@@ -188,6 +190,7 @@ contract Market is Ownable, ReentrancyGuard, IMarket {
     event SetMinExecutionFee(uint256 minExecutionFee);
     event SetMaxTimeDelay(uint256 maxTimeDelay);
     event CreateIncreasePosition(
+        bytes32 key,
         address indexed account,
         address indexToken,
         uint256 amountIn,
