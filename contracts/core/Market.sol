@@ -8,6 +8,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 import "../interfaces/IMarket.sol";
+import "../interfaces/IWETH.sol";
 
 contract Market is Ownable, ReentrancyGuard, Pausable, IMarket {
     using SafeMath for uint256;
@@ -41,6 +42,7 @@ contract Market is Ownable, ReentrancyGuard, Pausable, IMarket {
 
     address public collateral;
     address public vault;
+    address public immutable weth;
 
     /* ========== STATE VARIABLES ========== */
 
@@ -73,9 +75,20 @@ contract Market is Ownable, ReentrancyGuard, Pausable, IMarket {
 
     /* ========== CONSTRUCTORS ========== */
 
-    constructor(address _collateral, address _vault) {
+    constructor(
+        address _collateral,
+        address _vault,
+        address _weth
+    ) {
         collateral = _collateral;
         vault = _vault;
+        weth = _weth;
+    }
+
+    /* ========== FALLBACK ========== */
+    receive() external payable {
+        assert(msg.sender == weth);
+        // only accept ETH via fallback from the WETH contract
     }
 
     /* ========== VIEWS ========== */
@@ -97,6 +110,11 @@ contract Market is Ownable, ReentrancyGuard, Pausable, IMarket {
         emit SetMaxTimeDelay(_maxTimeDelay);
     }
 
+    function setExecutor(address executor) external onlyOwner {
+        executors[executor] = true;
+        emit SetExecutor(executor);
+    }
+
     function pause() external onlyOwner {
         _pause();
     }
@@ -109,7 +127,7 @@ contract Market is Ownable, ReentrancyGuard, Pausable, IMarket {
 
     /// @notice Create increase position request
     /// @param _indexToken Address of index token.
-    /// @param _amountIn Amount of dollar input.
+    /// @param _amountIn Amount of collateral input.
     /// @param _minAmountOut : Min amount of index token ouput;
     /// @param _sizeDelta : Size of position.
     /// @param _isLong : long or short position.
@@ -127,6 +145,7 @@ contract Market is Ownable, ReentrancyGuard, Pausable, IMarket {
             _executionFee >= minExecutionFee,
             "Market::createIncreasePosition Cannot smaller than minExecutionFee"
         );
+        IWETH(weth).deposit{value: _executionFee}();
         IERC20(_indexToken).safeTransferFrom(
             msg.sender,
             address(this),
@@ -170,6 +189,7 @@ contract Market is Ownable, ReentrancyGuard, Pausable, IMarket {
         nonReentrant
         onlyExecutors
     {
+        // step 1: validate request
         IncreasePositionRequest memory request = increasePositionRequests[_key];
         if (request.account == address(0)) {
             return;
@@ -179,7 +199,27 @@ contract Market is Ownable, ReentrancyGuard, Pausable, IMarket {
             "Market::executeIncreasePosition Request has expired"
         );
         delete increasePositionRequests[_key];
+        // step 2: calculate fee
+
+        // step 3: create position
         IERC20(collateral).safeTransfer(vault, request.amountIn);
+
+        // send execution fee
+        IWETH(weth).withdraw(request.executionFee);
+        payable(msg.sender).transfer(request.executionFee);
+
+        emit ExecuteIncreasePosition(
+            _key,
+            request.account,
+            request.indexToken,
+            request.amountIn,
+            request.minAmountOut,
+            request.sizeDelta,
+            request.isLong,
+            request.acceptablePrice,
+            request.executionFee,
+            block.timestamp
+        );
     }
 
     /* ========== INTERNAL FUNCTIONS ========== */
@@ -189,6 +229,7 @@ contract Market is Ownable, ReentrancyGuard, Pausable, IMarket {
     event SetDepositFee(uint256 depositFee);
     event SetMinExecutionFee(uint256 minExecutionFee);
     event SetMaxTimeDelay(uint256 maxTimeDelay);
+    event SetExecutor(address executor);
     event CreateIncreasePosition(
         bytes32 key,
         address indexed account,
@@ -200,6 +241,18 @@ contract Market is Ownable, ReentrancyGuard, Pausable, IMarket {
         uint256 acceptablePrice,
         uint256 executionFee,
         uint256 index,
+        uint256 blockTime
+    );
+    event ExecuteIncreasePosition(
+        bytes32 key,
+        address indexed account,
+        address indexToken,
+        uint256 amountIn,
+        uint256 minAmountOut,
+        uint256 sizeDelta,
+        bool isLong,
+        uint256 acceptablePrice,
+        uint256 executionFee,
         uint256 blockTime
     );
 }
