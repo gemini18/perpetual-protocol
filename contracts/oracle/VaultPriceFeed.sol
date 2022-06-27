@@ -30,28 +30,16 @@ contract VaultPriceFeed is Ownable {
         AggregatorV3Interface feed = AggregatorV3Interface(
             config.chainlinkFeed
         );
-        uint256 price = 0;
+        uint256 price = uint256(feed.latestAnswer());
         uint80 roundId = feed.latestRound();
         for (uint80 i = 0; i < CALCULATE_ROUND; i++) {
             if (roundId <= i) {
                 break;
             }
             uint256 p;
-
-            if (i == 0) {
-                int256 _p = feed.latestAnswer();
-                require(_p > 0, "VaultPriceFeed::getPrice invalid price");
-                p = uint256(_p);
-            } else {
-                (, int256 _p, , , ) = feed.getRoundData(roundId - i);
-                require(_p > 0, "VaultPriceFeed::getPrice invalid price");
-                p = uint256(_p);
-            }
-
-            if (price == 0) {
-                price = p;
-                continue;
-            }
+            (, int256 _p, , , ) = feed.getRoundData(roundId - i);
+            require(_p > 0, "VaultPriceFeed::getPrice invalid price");
+            p = uint256(_p);
 
             if (_maximise && p > price) {
                 price = p;
@@ -69,17 +57,15 @@ contract VaultPriceFeed is Ownable {
     /**
      * @notice config token
      * @param _token address of token
-     * @param _priceDecimals decimals of price
      * @param _chainlinkPriceFeed address of Chainlink compatible price feed
      */
-    function configToken(
-        address _token,
-        uint256 _priceDecimals,
-        address _chainlinkPriceFeed
-    ) external onlyOwner {
-        require(_priceDecimals == 0, "priceDecimalsNotAllowed");
+    function configToken(address _token, address _chainlinkPriceFeed)
+        external
+        onlyOwner
+    {
         require(_chainlinkPriceFeed != address(0), "priceFeedRequired");
-        _priceDecimals = AggregatorV3Interface(_chainlinkPriceFeed).decimals();
+        uint256 _priceDecimals = AggregatorV3Interface(_chainlinkPriceFeed)
+            .decimals();
 
         uint256 underlyingDecimals = ERC20(_token).decimals();
 

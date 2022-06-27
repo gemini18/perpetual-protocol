@@ -9,6 +9,7 @@ import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 import "../interfaces/IMarket.sol";
 import "../interfaces/IWETH.sol";
+import "../interfaces/IVault.sol";
 
 contract Market is Ownable, ReentrancyGuard, Pausable, IMarket {
     using SafeMath for uint256;
@@ -40,7 +41,6 @@ contract Market is Ownable, ReentrancyGuard, Pausable, IMarket {
     }
     /* ========== ADDRESSES ========== */
 
-    address public collateral;
     address public vault;
     address public immutable weth;
 
@@ -75,12 +75,7 @@ contract Market is Ownable, ReentrancyGuard, Pausable, IMarket {
 
     /* ========== CONSTRUCTORS ========== */
 
-    constructor(
-        address _collateral,
-        address _vault,
-        address _weth
-    ) {
-        collateral = _collateral;
+    constructor(address _vault, address _weth) {
         vault = _vault;
         weth = _weth;
     }
@@ -202,7 +197,8 @@ contract Market is Ownable, ReentrancyGuard, Pausable, IMarket {
         // step 2: calculate fee
 
         // step 3: create position
-        IERC20(collateral).safeTransfer(vault, request.amountIn);
+        address dollar = IVault(vault).dollar();
+        IERC20(dollar).safeTransfer(vault, request.amountIn);
 
         // send execution fee
         IWETH(weth).withdraw(request.executionFee);
