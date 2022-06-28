@@ -67,11 +67,6 @@ contract Market is Ownable, ReentrancyGuard, Pausable, IMarket {
 
     /* ========== MODIFIERS ========== */
 
-    modifier onlyExecutors() {
-        require(executors[msg.sender], "Market: onlyExecutors");
-        _;
-    }
-
     /* ========== CONSTRUCTORS ========== */
 
     constructor(address _vault, address _weth) {
@@ -180,11 +175,7 @@ contract Market is Ownable, ReentrancyGuard, Pausable, IMarket {
 
     /// @notice Execute increase position request
     /// @param _key key of increase position request.
-    function executeIncreasePosition(bytes32 _key)
-        public
-        nonReentrant
-        onlyExecutors
-    {
+    function executeIncreasePosition(bytes32 _key) public nonReentrant {
         // step 1: validate request
         IncreasePositionRequest memory request = increasePositionRequests[_key];
         if (request.account == address(0)) {
@@ -198,8 +189,6 @@ contract Market is Ownable, ReentrancyGuard, Pausable, IMarket {
         // step 2: calculate fee
 
         // step 3: create position
-        address dollar = IVault(vault).dollar();
-        IERC20(dollar).safeTransfer(vault, request.amountIn);
         if (request.isLong) {
             require(
                 IVault(vault).getMaxPrice(request.indexToken) >=
@@ -213,6 +202,9 @@ contract Market is Ownable, ReentrancyGuard, Pausable, IMarket {
                 "Market::executeIncreasePosition Mark price lower than limit"
             );
         }
+        address dollar = IVault(vault).dollar();
+        IERC20(dollar).safeApprove(vault, 0);
+        IERC20(dollar).safeApprove(vault, request.amountIn);
         IVault(vault).increasePosition(
             request.account,
             request.indexToken,
@@ -296,11 +288,7 @@ contract Market is Ownable, ReentrancyGuard, Pausable, IMarket {
 
     /// @notice Execute decrease position request
     /// @param _key key of decrease position request.
-    function executeDecreasePosition(bytes32 _key)
-        public
-        nonReentrant
-        onlyExecutors
-    {
+    function executeDecreasePosition(bytes32 _key) public nonReentrant {
         // step 1: validate request
         DecreasePositionRequest memory request = decreasePositionRequests[_key];
         if (request.account == address(0)) {

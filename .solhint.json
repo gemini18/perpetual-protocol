@@ -17,6 +17,10 @@
         "maxLength": 128
       }
     ],
+    "max-states-count": [
+      "warn",
+      20
+    ],
     "not-rely-on-time": "off"
   }
 }
