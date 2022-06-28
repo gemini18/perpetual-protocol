@@ -61,6 +61,9 @@ contract Vault is Ownable, Pausable, ReentrancyGuard, IVault {
 
     uint256 public minProfitTime;
 
+    //leverage
+    uint256 public maxLeverage = 50; // 50x
+
     /* ========== MODIFIERS ========== */
 
     modifier onlyWhitelistedTokens(address token) {
@@ -106,14 +109,25 @@ contract Vault is Ownable, Pausable, ReentrancyGuard, IVault {
         return keccak256(abi.encodePacked(_account, _indexToken, _isLong));
     }
 
-    function getMaxPrice(address _token) public view returns (uint256) {
+    function getMaxPrice(address _token)
+        public
+        view
+        override
+        returns (uint256)
+    {
         return IVaultPriceFeed(priceFeed).getPrice(_token, true);
     }
 
-    function getMinPrice(address _token) public view returns (uint256) {
+    function getMinPrice(address _token)
+        public
+        view
+        override
+        returns (uint256)
+    {
         return IVaultPriceFeed(priceFeed).getPrice(_token, false);
     }
 
+    /// @notice check if has profit
     function getDelta(
         address _indexToken,
         uint256 _size,
@@ -141,32 +155,6 @@ contract Vault is Ownable, Pausable, ReentrancyGuard, IVault {
         }
 
         return (hasProfit, delta);
-    }
-
-    function getNextEntryPrice(
-        address _indexToken,
-        uint256 _size,
-        uint256 _entryPrice,
-        bool _isLong,
-        uint256 _nextPrice,
-        uint256 _sizeDelta,
-        uint256 _lastIncreasedTime
-    ) public view returns (uint256) {
-        (bool hasProfit, uint256 delta) = getDelta(
-            _indexToken,
-            _size,
-            _entryPrice,
-            _isLong,
-            _lastIncreasedTime
-        );
-        uint256 nextSize = _size.add(_sizeDelta);
-        uint256 denom;
-        if (_isLong) {
-            denom = hasProfit ? nextSize.add(delta) : nextSize.sub(delta);
-        } else {
-            denom = hasProfit ? nextSize.sub(delta) : nextSize.add(delta);
-        }
-        return _nextPrice.mul(nextSize).div(denom);
     }
 
     function getPositionFee(uint256 _sizeDelta) public view returns (uint256) {
@@ -243,39 +231,143 @@ contract Vault is Ownable, Pausable, ReentrancyGuard, IVault {
             ? getMaxPrice(_indexToken)
             : getMinPrice(_indexToken);
 
+        // set position entryPrice if no position exist
         if (position.size == 0) {
             position.entryPrice = price;
         }
+
+        (bool hasProfit, uint256 delta) = getDelta(
+            _indexToken,
+            position.size,
+            position.entryPrice,
+            _isLong,
+            position.lastIncreasedTime
+        );
+
+        // calculate new entry price if increase size of position
+        // entryPrice = nextPrice * nextSize / (nextSize + delta)
         if (position.size > 0 && _sizeDelta > 0) {
-            position.entryPrice = getNextEntryPrice(
-                _indexToken,
-                position.size,
-                position.entryPrice,
-                _isLong,
-                price,
-                _sizeDelta,
-                position.lastIncreasedTime
-            );
+            uint256 denom;
+            uint256 nextSize = position.size.add(_sizeDelta);
+            if (_isLong) {
+                denom = hasProfit ? nextSize.add(delta) : nextSize.sub(delta);
+            } else {
+                denom = hasProfit ? nextSize.sub(delta) : nextSize.add(delta);
+            }
+            position.entryPrice = price.mul(nextSize).div(denom);
         }
-        position.collateral = position.collateral.add(_dollarIn);
+
+        // update entryFundingRate = cumulativeFundingRate
+        // size = size + _sizeDelta
+        // lastIncreasedTime = block.timestamp
+        position.entryFundingRate = cumulativeFundingRate;
+        position.size = position.size.add(_sizeDelta);
+        position.lastIncreasedTime = block.timestamp;
+
+        // calculate marginFee = positionFee + fundingFee
+        // update fee reserve
+        // calculte collateral of position: collateral = collateral + _dollarIn - fee;
         uint256 fee = _collectMarginFees(
             _sizeDelta,
             position.size,
             position.entryFundingRate
         );
-        position.collateral = position.collateral.sub(fee);
-        position.entryFundingRate = cumulativeFundingRate;
-        position.size = position.size.add(_sizeDelta);
-        position.lastIncreasedTime = block.timestamp;
+        position.collateral = position.collateral.add(_dollarIn).sub(fee);
+
+        // validate liquidation
         require(position.size > 0, "Vault: empty position");
         require(
             position.size >= position.collateral,
             "Vault: size must be more than collateral"
         );
-        // validate liquidation
+        if (!hasProfit && position.collateral < delta) {
+            revert("Vault: losses exceed collateral");
+        }
+        uint256 remainingCollateral = position.collateral;
+        if (!hasProfit) {
+            remainingCollateral = position.collateral.sub(delta);
+        }
+        if (remainingCollateral < fee) {
+            revert("Vault: fees exceed collateral");
+        }
+        if (remainingCollateral < fee.add(liquidationFee)) {
+            revert("Vault: liquidation fees exceed collateral");
+        }
 
+        if (position.size.div(remainingCollateral) > maxLeverage) {
+            revert("Vault: maxLeverage exceeded");
+        }
+
+        // update reserveAmount = reserveAmount + _sizeDelta
         position.reserveAmount = position.reserveAmount.add(_sizeDelta);
         _increaseReservedAmount(_sizeDelta);
+
+        if (_isLong) {
+            // treat the deposited collateral as part of the pool
+            _increasePoolAmount(_dollarIn);
+            // fees need to be deducted from the pool since fees are deducted from position.collateral
+            // and collateral is treated as part of the pool
+            _decreasePoolAmount(fee);
+        }
+
+        emit IncreasePosition(
+            key,
+            _account,
+            _indexToken,
+            _dollarIn,
+            _sizeDelta,
+            _isLong,
+            price,
+            fee
+        );
+        emit UpdatePosition(
+            key,
+            position.size,
+            position.collateral,
+            position.entryPrice,
+            position.entryFundingRate,
+            position.reserveAmount,
+            position.realisedPnl,
+            price
+        );
+    }
+
+    function decreasePosition(
+        address _account,
+        address _indexToken,
+        uint256 _collateralDelta,
+        uint256 _sizeDelta,
+        bool _isLong
+    )
+        external
+        nonReentrant
+        whenNotPaused
+        onlyPlugins
+        onlyWhitelistedTokens(_indexToken)
+    {
+        bytes32 key = getPositionKey(_account, _indexToken, _isLong);
+        Position storage position = positions[key];
+        require(position.size > 0, "Vault: empty position");
+        require(position.size > _sizeDelta, "Vault: invalid position size");
+        require(
+            position.collateral > _collateralDelta,
+            "Vault: position collateral exceeded"
+        );
+        {
+            uint256 reserveDelta = position.reserveAmount.mul(_sizeDelta).div(
+                position.size
+            );
+            position.reserveAmount = position.reserveAmount.sub(reserveDelta);
+            _decreaseReservedAmount(reserveDelta);
+        }
+
+        (uint256 usdOut, uint256 usdOutAfterFee) = _reduceCollateral(
+            _account,
+            _indexToken,
+            _collateralDelta,
+            _sizeDelta,
+            _isLong
+        );
     }
 
     /* ========== PRIVATE FUNCTIONS ========== */
@@ -289,10 +381,96 @@ contract Vault is Ownable, Pausable, ReentrancyGuard, IVault {
 
         uint256 fundingFee = getFundingFee(_size, _entryFundingRate);
         uint256 totalFee = positionFee.add(fundingFee);
-        feeReserves = feeReserves.add(totalFee);
 
-        emit CollectMarginFees(totalFee);
+        feeReserves = feeReserves.add(totalFee);
         return totalFee;
+    }
+
+    function _reduceCollateral(
+        address _account,
+        address _indexToken,
+        uint256 _collateralDelta,
+        uint256 _sizeDelta,
+        bool _isLong
+    ) private returns (uint256, uint256) {
+        bytes32 key = getPositionKey(_account, _indexToken, _isLong);
+        Position storage position = positions[key];
+
+        uint256 fee = _collectMarginFees(
+            _sizeDelta,
+            position.size,
+            position.entryFundingRate
+        );
+        bool hasProfit;
+        uint256 adjustedDelta;
+
+        // scope variables to avoid stack too deep errors
+        {
+            (bool _hasProfit, uint256 delta) = getDelta(
+                _indexToken,
+                position.size,
+                position.entryPrice,
+                _isLong,
+                position.lastIncreasedTime
+            );
+            hasProfit = _hasProfit;
+            // get the proportional change in pnl
+            adjustedDelta = _sizeDelta.mul(delta).div(position.size);
+        }
+
+        uint256 usdOut;
+        // transfer profits out
+        if (hasProfit && adjustedDelta > 0) {
+            usdOut = adjustedDelta;
+            position.realisedPnl = position.realisedPnl + int256(adjustedDelta);
+
+            // pay out realised profits from the pool amount for short positions
+            if (!_isLong) {
+                _decreasePoolAmount(adjustedDelta);
+            }
+        }
+
+        if (!hasProfit && adjustedDelta > 0) {
+            position.collateral = position.collateral.sub(adjustedDelta);
+
+            // transfer realised losses to the pool for short positions
+            // realised losses for long positions are not transferred here as
+            // _increasePoolAmount was already called in increasePosition for longs
+            if (!_isLong) {
+                _increasePoolAmount(adjustedDelta);
+            }
+
+            position.realisedPnl = position.realisedPnl - int256(adjustedDelta);
+        }
+
+        // reduce the position's collateral by _collateralDelta
+        // transfer _collateralDelta out
+        if (_collateralDelta > 0) {
+            usdOut = usdOut.add(_collateralDelta);
+            position.collateral = position.collateral.sub(_collateralDelta);
+        }
+
+        // if the position will be closed, then transfer the remaining collateral out
+        if (position.size == _sizeDelta) {
+            usdOut = usdOut.add(position.collateral);
+            position.collateral = 0;
+        }
+
+        // if the usdOut is more than the fee then deduct the fee from the usdOut directly
+        // else deduct the fee from the position's collateral
+        uint256 usdOutAfterFee = usdOut;
+        if (usdOut > fee) {
+            usdOutAfterFee = usdOut.sub(fee);
+        } else {
+            position.collateral = position.collateral.sub(fee);
+            if (_isLong) {
+                _decreasePoolAmount(fee);
+            }
+        }
+
+        emit UpdatePnl(key, hasProfit, adjustedDelta);
+
+        return (usdOut, usdOutAfterFee);
     }
 
     function _increaseReservedAmount(uint256 _amount) private {
@@ -301,8 +479,52 @@ contract Vault is Ownable, Pausable, ReentrancyGuard, IVault {
         emit IncreaseReservedAmount(_amount);
     }
 
+    function _decreaseReservedAmount(uint256 _amount) private {
+        reservedAmount = reservedAmount.sub(
+            _amount,
+            "Vault: insufficient reserve"
+        );
+        emit DecreaseReservedAmount(_amount);
+    }
+
+    function _increasePoolAmount(uint256 _amount) private {
+        poolAmount = poolAmount.add(_amount);
+        uint256 balance = IERC20(dollar).balanceOf(address(this));
+        require(poolAmount <= balance, "Vault: pool exceeds balance");
+        emit IncreasePoolAmount(_amount);
+    }
+
+    function _decreasePoolAmount(uint256 _amount) private {
+        poolAmount = poolAmount.sub(_amount, "Vault: poolAmount exceeded");
+        require(reservedAmount <= poolAmount, "Vault: reserve exceeds pool");
+        emit DecreasePoolAmount(_amount);
+    }
+
     /* ========== EVENTS ========== */
     event SetPlugin(address plugin);
-    event CollectMarginFees(uint256 fee);
     event IncreaseReservedAmount(uint256 amount);
+    event DecreaseReservedAmount(uint256 amount);
+    event IncreasePoolAmount(uint256 amount);
+    event DecreasePoolAmount(uint256 amount);
+    event IncreasePosition(
+        bytes32 key,
+        address account,
+        address indexToken,
+        uint256 collateralDelta,
+        uint256 sizeDelta,
+        bool isLong,
+        uint256 price,
+        uint256 fee
+    );
+    event UpdatePosition(
+        bytes32 key,
+        uint256 size,
+        uint256 collateral,
+        uint256 entryPrice,
+        uint256 entryFundingRate,
+        uint256 reserveAmount,
+        int256 realisedPnl,
+        uint256 markPrice
+    );
+    event UpdatePnl(bytes32 key, bool hasProfit, uint256 delta);
 }

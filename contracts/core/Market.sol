@@ -33,7 +33,6 @@ contract Market is Ownable, ReentrancyGuard, Pausable, IMarket {
         uint256 collateralDelta;
         uint256 sizeDelta;
         bool isLong;
-        address receiver;
         uint256 acceptablePrice;
         uint256 minAmountOut;
         uint256 executionFee;
@@ -179,6 +178,8 @@ contract Market is Ownable, ReentrancyGuard, Pausable, IMarket {
         );
     }
 
+    /// @notice Execute increase position request
+    /// @param _key key of increase position request.
     function executeIncreasePosition(bytes32 _key)
         public
         nonReentrant
@@ -199,8 +200,28 @@ contract Market is Ownable, ReentrancyGuard, Pausable, IMarket {
         // step 3: create position
         address dollar = IVault(vault).dollar();
         IERC20(dollar).safeTransfer(vault, request.amountIn);
+        if (request.isLong) {
+            require(
+                IVault(vault).getMaxPrice(request.indexToken) >=
+                    request.acceptablePrice,
+                "Market::executeIncreasePosition Mark price higher than limit"
+            );
+        } else {
+            require(
+                IVault(vault).getMinPrice(request.indexToken) <=
+                    request.acceptablePrice,
+                "Market::executeIncreasePosition Mark price lower than limit"
+            );
+        }
+        IVault(vault).increasePosition(
+            request.account,
+            request.indexToken,
+            request.amountIn,
+            request.sizeDelta,
+            request.isLong
+        );
 
-        // send execution fee
+        // step 4: send execution fee
         IWETH(weth).withdraw(request.executionFee);
         payable(msg.sender).transfer(request.executionFee);
 
@@ -216,6 +237,100 @@ contract Market is Ownable, ReentrancyGuard, Pausable, IMarket {
             request.executionFee,
             block.timestamp
         );
+    }
+
+    /// @notice Create decrease position request
+    /// @param _indexToken Address of index token.
+    /// @param _collateralDelta Amount of collateral decrease.
+    /// @param _sizeDelta : Size of position.
+    /// @param _isLong : long or short position.
+    /// @param _acceptablePrice : acceptable price of index token
+    /// @param _minAmountOut : Min amount of index token ouput;
+    function createDecreasePosition(
+        address _indexToken,
+        uint256 _collateralDelta,
+        uint256 _sizeDelta,
+        bool _isLong,
+        uint256 _acceptablePrice,
+        uint256 _minAmountOut
+    ) external payable nonReentrant whenNotPaused {
+        uint256 _executionFee = msg.value;
+        require(
+            _executionFee >= minExecutionFee,
+            "Market::createDecreasePosition Cannot smaller than minExecutionFee"
+        );
+        IWETH(weth).deposit{value: _executionFee}();
+
+        address _account = msg.sender;
+        uint256 index = decreasePositionsIndex[_account].add(1);
+        decreasePositionsIndex[_account] = index;
+
+        DecreasePositionRequest memory request = DecreasePositionRequest(
+            _account,
+            _indexToken,
+            _collateralDelta,
+            _sizeDelta,
+            _isLong,
+            _acceptablePrice,
+            _minAmountOut,
+            _executionFee,
+            block.timestamp
+        );
+        bytes32 key = keccak256(abi.encodePacked(_account, index));
+        decreasePositionRequests[key] = request;
+
+        emit CreateDecreasePosition(
+            key,
+            _account,
+            _indexToken,
+            _collateralDelta,
+            _sizeDelta,
+            _isLong,
+            _acceptablePrice,
+            _minAmountOut,
+            _executionFee,
+            index,
+            block.number
+        );
+    }
+
+    /// @notice Execute decrease position request
+    /// @param _key key of decrease position request.
+    function executeDecreasePosition(bytes32 _key)
+        public
+        nonReentrant
+        onlyExecutors
+    {
+        // step 1: validate request
+        DecreasePositionRequest memory request = decreasePositionRequests[_key];
+        if (request.account == address(0)) {
+            return;
+        }
+        require(
+            request.blockTime.add(maxTimeDelay) > block.timestamp,
+            "Market::executeDecreasePosition Request has expired"
+        );
+        delete decreasePositionRequests[_key];
+        // step 2: calculate fee
+
+        // step 3: decrease position
+        if (request.isLong) {
+            require(
+                IVault(vault).getMinPrice(request.indexToken) >=
+                    request.acceptablePrice,
+                "Market::executeDecreasePosition Mark price lower than limit"
+            );
+        } else {
+            require(
+                IVault(vault).getMaxPrice(request.indexToken) <=
+                    request.acceptablePrice,
+                "Market::executeDecreasePosition Mark price higher than limit"
+            );
+        }
+
+        // step 4: send execution fee
+        IWETH(weth).withdraw(request.executionFee);
+        payable(msg.sender).transfer(request.executionFee);
     }
 
     /* ========== INTERNAL FUNCTIONS ========== */
@@ -249,6 +364,19 @@ contract Market is Ownable, ReentrancyGuard, Pausable, IMarket {
         bool isLong,
         uint256 acceptablePrice,
         uint256 executionFee,
+        uint256 blockTime
+    );
+    event CreateDecreasePosition(
+        bytes32 key,
+        address indexed account,
+        address indexToken,
+        uint256 collateralDelta,
+        uint256 sizeDelta,
+        bool isLong,
+        uint256 acceptablePrice,
+        uint256 minAmountOut,
+        uint256 executionFee,
+        uint256 index,
         uint256 blockTime
     );
 }
