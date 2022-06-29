@@ -7,11 +7,10 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
-import "../interfaces/IMarket.sol";
 import "../interfaces/IWETH.sol";
 import "../interfaces/IVault.sol";
 
-contract Market is Ownable, ReentrancyGuard, Pausable, IMarket {
+contract Market is Ownable, ReentrancyGuard, Pausable {
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
 
@@ -191,13 +190,13 @@ contract Market is Ownable, ReentrancyGuard, Pausable, IMarket {
         // step 3: create position
         if (request.isLong) {
             require(
-                IVault(vault).getMaxPrice(request.indexToken) >=
+                IVault(vault).getMaxPrice(request.indexToken) <=
                     request.acceptablePrice,
                 "Market::executeIncreasePosition Mark price higher than limit"
             );
         } else {
             require(
-                IVault(vault).getMinPrice(request.indexToken) <=
+                IVault(vault).getMinPrice(request.indexToken) >=
                     request.acceptablePrice,
                 "Market::executeIncreasePosition Mark price lower than limit"
             );
