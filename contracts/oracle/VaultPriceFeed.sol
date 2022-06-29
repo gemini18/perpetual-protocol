@@ -14,7 +14,6 @@ contract VaultPriceFeed is Ownable {
         uint256 priceUnit;
     }
 
-    uint256 public constant PRICE_PRECISION = 1e6;
     uint8 public constant CALCULATE_ROUND = 3; // number of rounds to calculate
 
     mapping(address => TokenConfig) public tokenConfigs;

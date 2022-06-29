@@ -66,6 +66,11 @@ contract Vault is
         emit SetPlugin(plugin);
     }
 
+    function setWhitelistedToken(address token) external onlyOwner {
+        whitelistedTokens[token] = true;
+        emit SetWhitelistedToken(token);
+    }
+
     function pause() external onlyOwner {
         _pause();
     }
@@ -78,22 +83,23 @@ contract Vault is
 
     /// @notice Update cumulative fundingRate
     function refreshCumulativeFundingRate() public {
-        require(
-            block.timestamp.sub(lastRefreshFundingRateTimestamp) >=
-                FUNDING_INTERVAL,
-            "Vault::refreshCumulativeFundingRate: Must wait for the funding interval since last refresh"
-        );
+        if (
+            block.timestamp.sub(lastRefreshFundingRateTimestamp) <
+            FUNDING_INTERVAL
+        ) return;
         uint256 intervals = block
             .timestamp
             .sub(lastRefreshFundingRateTimestamp)
             .div(FUNDING_INTERVAL);
         if (poolAmount == 0) {
             cumulativeFundingRate = 0;
+        } else {
+            cumulativeFundingRate = fundingRateFactor
+                .mul(reservedAmount)
+                .mul(intervals)
+                .div(poolAmount);
         }
-        cumulativeFundingRate = fundingRateFactor
-            .mul(reservedAmount)
-            .mul(intervals)
-            .div(poolAmount);
+
         lastRefreshFundingRateTimestamp = block.timestamp;
     }
 
@@ -208,6 +214,7 @@ contract Vault is
     {
         bytes32 key = getPositionKey(_account, _token, _isLong);
         Position storage position = positions[key];
+        refreshCumulativeFundingRate();
 
         uint256 actualAmount = doTransferIn(msg.sender, _amountIn);
 
@@ -243,6 +250,7 @@ contract Vault is
         // lastIncreasedTime = block.timestamp
         position.entryFundingRate = cumulativeFundingRate;
         position.size = position.size.add(_sizeDelta);
+        require(position.size > 0, "Vault: invalid position size");
 
         // calculate marginFee = positionFee + fundingFee
         // update fee reserve
@@ -253,6 +261,14 @@ contract Vault is
             position.entryFundingRate
         );
         position.collateral = position.collateral.add(actualAmount).sub(fee);
+        require(
+            position.collateral >= fee,
+            "Vault: insufficient collateral for fees"
+        );
+        require(
+            position.size >= position.collateral,
+            "Vault: size must be more than collateral"
+        );
 
         // validate liquidation
         uint256 allowed = liquidatePositionAllowed(_account, _token, _isLong);
@@ -305,6 +321,7 @@ contract Vault is
         onlyPlugins
         onlyWhitelistedTokens(_token)
     {
+        refreshCumulativeFundingRate();
         bytes32 key = getPositionKey(_account, _token, _isLong);
         Position storage position = positions[key];
         require(position.size > 0, "Vault: empty position");
@@ -547,6 +564,7 @@ contract Vault is
 
     /* ========== EVENTS ========== */
     event SetPlugin(address plugin);
+    event SetWhitelistedToken(address token);
     event IncreaseReservedAmount(uint256 amount);
     event DecreaseReservedAmount(uint256 amount);
     event IncreasePoolAmount(uint256 amount);
