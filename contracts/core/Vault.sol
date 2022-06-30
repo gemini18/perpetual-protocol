@@ -3,12 +3,15 @@
 pragma solidity 0.8.4;
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 import "../interfaces/IVaultPriceFeed.sol";
+import "../interfaces/IUSDG.sol";
 import "./VaultStorage.sol";
 import "../common/ErrorReporter.sol";
+import "hardhat/console.sol";
 
 contract Vault is
     VaultStorage,
@@ -17,7 +20,6 @@ contract Vault is
     Pausable,
     ReentrancyGuard
 {
-    using SafeMath for uint256;
     using SafeERC20 for IERC20;
 
     /// @notice Constants for various precisions
@@ -41,15 +43,13 @@ contract Vault is
     constructor(
         address _weth,
         address _dollar,
-        address _priceFeed,
-        uint256 _liquidationFee,
-        uint256 _fundingRateFactor
+        address _usdg,
+        address _priceFeed
     ) {
         weth = _weth;
         dollar = _dollar;
+        usdg = _usdg;
         priceFeed = _priceFeed;
-        liquidationFee = _liquidationFee;
-        fundingRateFactor = _fundingRateFactor;
     }
 
     /* ========== FALLBACK ========== */
@@ -71,6 +71,13 @@ contract Vault is
         emit SetWhitelistedToken(token);
     }
 
+    function setErrors(string[] memory messages) external onlyOwner {
+        for (uint256 i = 0; i < messages.length; i++) {
+            errors[i] = messages[i];
+        }
+        emit SetErrors(messages);
+    }
+
     function pause() external onlyOwner {
         _pause();
     }
@@ -84,34 +91,22 @@ contract Vault is
     /// @notice Update cumulative fundingRate
     function refreshCumulativeFundingRate() public {
         if (
-            block.timestamp.sub(lastRefreshFundingRateTimestamp) <
-            FUNDING_INTERVAL
+            block.timestamp - lastRefreshFundingRateTimestamp < FUNDING_INTERVAL
         ) return;
-        uint256 intervals = block
-            .timestamp
-            .sub(lastRefreshFundingRateTimestamp)
-            .div(FUNDING_INTERVAL);
+        uint256 intervals = (block.timestamp -
+            lastRefreshFundingRateTimestamp) / FUNDING_INTERVAL;
         if (poolAmount == 0) {
             cumulativeFundingRate = 0;
         } else {
-            cumulativeFundingRate = fundingRateFactor
-                .mul(reservedAmount)
-                .mul(intervals)
-                .div(poolAmount);
+            cumulativeFundingRate =
+                (fundingRateFactor * reservedAmount * intervals) /
+                poolAmount;
         }
 
         lastRefreshFundingRateTimestamp = block.timestamp;
     }
 
     /* ========== VIEWS ========== */
-
-    function getPositionKey(
-        address _account,
-        address _token,
-        bool _isLong
-    ) public pure returns (bytes32) {
-        return keccak256(abi.encodePacked(_account, _token, _isLong));
-    }
 
     /// @notice get max price of token
     /// @param _token Address of token.
@@ -126,6 +121,10 @@ contract Vault is
     }
 
     /// @notice check if has profit
+    /// @param _token Address of token.
+    /// @param _size Size of position.
+    /// @param _entryPrice Entry price of position.
+    /// @param _isLong long or short position
     function getDelta(
         address _token,
         uint256 _size,
@@ -134,9 +133,9 @@ contract Vault is
     ) public view returns (bool, uint256) {
         uint256 markPrice = _isLong ? getMinPrice(_token) : getMaxPrice(_token);
         uint256 priceDelta = _entryPrice > markPrice
-            ? _entryPrice.sub(markPrice)
-            : markPrice.sub(_entryPrice);
-        uint256 delta = _size.mul(priceDelta).div(_entryPrice);
+            ? _entryPrice - markPrice
+            : markPrice - _entryPrice;
+        uint256 delta = (_size * priceDelta) / _entryPrice;
 
         bool hasProfit = _isLong
             ? markPrice > _entryPrice
@@ -145,25 +144,11 @@ contract Vault is
         return (hasProfit, delta);
     }
 
-    function getPositionFee(uint256 _sizeDelta) public view returns (uint256) {
-        return _sizeDelta.mul(marginFee).div(PRECISION);
-    }
-
-    function getFundingFee(uint256 _size, uint256 _entryFundingRate)
-        public
-        view
-        returns (uint256)
-    {
-        uint256 fundingRate = cumulativeFundingRate.sub(_entryFundingRate);
-        return _size.mul(fundingRate).div(PRECISION);
-    }
-
     function liquidatePositionAllowed(
-        address _account,
+        bytes32 key,
         address _token,
         bool _isLong
     ) public view returns (uint256) {
-        bytes32 key = getPositionKey(_account, _token, _isLong);
         Position storage position = positions[key];
 
         if (position.size == 0) return uint256(Error.POSISTION_NOT_EXIST);
@@ -175,29 +160,68 @@ contract Vault is
             _isLong
         );
 
-        uint256 fees = getFundingFee(position.size, position.entryFundingRate)
-            .add(getPositionFee(position.size));
         if (!hasProfit && position.collateral < delta)
             return uint256(Error.LOSSES_EXCEED_COLLATERAL);
 
         uint256 remainingCollateral = position.collateral;
+
         if (!hasProfit) {
-            remainingCollateral = position.collateral.sub(delta);
-        }
-        if (remainingCollateral < fees) {
-            return uint256(Error.FEES_EXCEED_COLLATERAL);
-        }
-        if (remainingCollateral < fees.add(liquidationFee)) {
-            return uint256(Error.LIQUIDATION_FEES_EXCEED_COLLATERAL);
+            remainingCollateral = position.collateral - delta;
         }
 
-        if (position.size.div(remainingCollateral) > maxLeverage) {
+        if (position.size / remainingCollateral > maxLeverage) {
             return uint256(Error.MAX_LEVERAGE_EXCEED);
         }
         return uint256(Error.NO_ERROR);
     }
 
     /* ========== MUTATIVE FUNCTIONS ========== */
+
+    function buyUSDG(uint256 _amount) external nonReentrant returns (uint256) {
+        uint256 actualAmount = doTransferIn(dollar, msg.sender, _amount);
+        refreshCumulativeFundingRate();
+
+        uint256 missingDecimals = 18 +
+            IUSDG(usdg).decimals() -
+            ERC20(dollar).decimals();
+
+        uint256 usdgAmount = (actualAmount * 10**missingDecimals) /
+            PRICE_PRECISION;
+        require(usdgAmount > 0, "Vault: invalid usdgAmount");
+
+        _increasePoolAmount(actualAmount);
+
+        IUSDG(usdg).mint(usdgAmount);
+
+        emit BuyUSDG(msg.sender, usdgAmount);
+
+        return usdgAmount;
+    }
+
+    function sellUSDG(uint256 _amount) external nonReentrant returns (uint256) {
+        address receiver = msg.sender;
+        uint256 actualAmount = doTransferIn(usdg, receiver, _amount);
+        require(actualAmount > 0, "Vault: invalid usdgAmount");
+
+        refreshCumulativeFundingRate();
+
+        _decreasePoolAmount(actualAmount);
+
+        IUSDG(usdg).burn(address(this), actualAmount);
+
+        uint256 missingDecimals = 18 +
+            IUSDG(usdg).decimals() -
+            ERC20(dollar).decimals();
+
+        uint256 amountOut = (actualAmount * PRICE_PRECISION) /
+            10**missingDecimals;
+
+        doTransferOut(dollar, receiver, amountOut);
+
+        emit SellUSDG(receiver, actualAmount);
+
+        return actualAmount;
+    }
 
     function increasePosition(
         address _account,
@@ -212,11 +236,11 @@ contract Vault is
         onlyPlugins
         onlyWhitelistedTokens(_token)
     {
-        bytes32 key = getPositionKey(_account, _token, _isLong);
+        bytes32 key = keccak256(abi.encodePacked(_account, _token, _isLong));
         Position storage position = positions[key];
         refreshCumulativeFundingRate();
 
-        uint256 actualAmount = doTransferIn(msg.sender, _amountIn);
+        uint256 actualAmount = doTransferIn(dollar, msg.sender, _amountIn);
 
         uint256 markPrice = _isLong ? getMaxPrice(_token) : getMinPrice(_token);
 
@@ -236,54 +260,40 @@ contract Vault is
         // entryPrice = nextPrice * nextSize / (nextSize + delta)
         if (position.size > 0 && _sizeDelta > 0) {
             uint256 denom;
-            uint256 nextSize = position.size.add(_sizeDelta);
+            uint256 nextSize = position.size + _sizeDelta;
             if (_isLong) {
-                denom = hasProfit ? nextSize.add(delta) : nextSize.sub(delta);
+                denom = hasProfit ? nextSize + delta : nextSize - delta;
             } else {
-                denom = hasProfit ? nextSize.sub(delta) : nextSize.add(delta);
+                denom = hasProfit ? nextSize - delta : nextSize + delta;
             }
-            position.entryPrice = markPrice.mul(nextSize).div(denom);
+            position.entryPrice = (markPrice * nextSize) / denom;
         }
 
         // update entryFundingRate = cumulativeFundingRate
         // size = size + _sizeDelta
         // lastIncreasedTime = block.timestamp
         position.entryFundingRate = cumulativeFundingRate;
-        position.size = position.size.add(_sizeDelta);
+        position.size += _sizeDelta;
         require(position.size > 0, "Vault: invalid position size");
 
-        // calculate marginFee = positionFee + fundingFee
-        // update fee reserve
-        // calculte collateral of position: collateral = collateral + actualAmount - fee;
-        uint256 fee = _collectMarginFees(
-            _sizeDelta,
-            position.size,
-            position.entryFundingRate
-        );
-        position.collateral = position.collateral.add(actualAmount).sub(fee);
-        require(
-            position.collateral >= fee,
-            "Vault: insufficient collateral for fees"
-        );
+        // calculte collateral of position: collateral = collateral + actualAmount;
+        position.collateral += actualAmount;
         require(
             position.size >= position.collateral,
             "Vault: size must be more than collateral"
         );
 
         // validate liquidation
-        uint256 allowed = liquidatePositionAllowed(_account, _token, _isLong);
+        uint256 allowed = liquidatePositionAllowed(key, _token, _isLong);
         validate(allowed);
 
         // update reserveAmount = reserveAmount + _sizeDelta
-        position.reserveAmount = position.reserveAmount.add(_sizeDelta);
+        position.reserveAmount += _sizeDelta;
         _increaseReservedAmount(_sizeDelta);
 
         if (_isLong) {
             // treat the deposited collateral as part of the pool
             _increasePoolAmount(actualAmount);
-            // fees need to be deducted from the pool since fees are deducted from position.collateral
-            // and collateral is treated as part of the pool
-            _decreasePoolAmount(fee);
         }
 
         emit IncreasePosition(
@@ -293,8 +303,7 @@ contract Vault is
             actualAmount,
             _sizeDelta,
             _isLong,
-            markPrice,
-            fee
+            markPrice
         );
         emit UpdatePosition(
             key,
@@ -322,26 +331,25 @@ contract Vault is
         onlyWhitelistedTokens(_token)
     {
         refreshCumulativeFundingRate();
-        bytes32 key = getPositionKey(_account, _token, _isLong);
+        bytes32 key = keccak256(abi.encodePacked(_account, _token, _isLong));
         Position storage position = positions[key];
         require(position.size > 0, "Vault: empty position");
-        require(position.size > _sizeDelta, "Vault: invalid position size");
+        require(position.size >= _sizeDelta, "Vault: invalid position size");
         require(
             position.collateral > _collateralDelta,
             "Vault: position collateral exceeded"
         );
         {
-            uint256 reserveDelta = position.reserveAmount.mul(_sizeDelta).div(
-                position.size
-            );
-            position.reserveAmount = position.reserveAmount.sub(reserveDelta);
+            uint256 reserveDelta = (position.reserveAmount * _sizeDelta) /
+                position.size;
+            position.reserveAmount -= reserveDelta;
             _decreaseReservedAmount(reserveDelta);
         }
 
         uint256 markPrice = _isLong ? getMinPrice(_token) : getMaxPrice(_token);
 
-        (uint256 usdOut, uint256 usdOutAfterFee) = _reduceCollateral(
-            _account,
+        uint256 usdOut = _reduceCollateral(
+            key,
             _token,
             _collateralDelta,
             _sizeDelta,
@@ -351,17 +359,13 @@ contract Vault is
         // close all or part of position;
         if (position.size != _sizeDelta) {
             position.entryFundingRate = cumulativeFundingRate;
-            position.size = position.size.sub(_sizeDelta);
+            position.size -= _sizeDelta;
             require(
                 position.size >= position.collateral,
                 "Vault: Size must be more than collateral"
             );
             // validate liquidation
-            uint256 allowed = liquidatePositionAllowed(
-                _account,
-                _token,
-                _isLong
-            );
+            uint256 allowed = liquidatePositionAllowed(key, _token, _isLong);
             validate(allowed);
 
             emit DecreasePosition(
@@ -371,8 +375,7 @@ contract Vault is
                 _collateralDelta,
                 _sizeDelta,
                 _isLong,
-                markPrice,
-                usdOut.sub(usdOutAfterFee)
+                markPrice
             );
             emit UpdatePosition(
                 key,
@@ -392,8 +395,7 @@ contract Vault is
                 _collateralDelta,
                 _sizeDelta,
                 _isLong,
-                markPrice,
-                usdOut.sub(usdOutAfterFee)
+                markPrice
             );
             emit ClosePosition(
                 key,
@@ -412,41 +414,21 @@ contract Vault is
             if (_isLong) {
                 _decreasePoolAmount(usdOut);
             }
-            doTransferOut(_account, usdOutAfterFee);
+            doTransferOut(dollar, _account, usdOut);
         }
     }
 
     /* ========== PRIVATE FUNCTIONS ========== */
 
-    function _collectMarginFees(
-        uint256 _sizeDelta,
-        uint256 _size,
-        uint256 _entryFundingRate
-    ) private returns (uint256) {
-        uint256 positionFee = getPositionFee(_sizeDelta);
-
-        uint256 fundingFee = getFundingFee(_size, _entryFundingRate);
-        uint256 totalFee = positionFee.add(fundingFee);
-
-        feeReserves = feeReserves.add(totalFee);
-        return totalFee;
-    }
-
     function _reduceCollateral(
-        address _account,
+        bytes32 key,
         address _token,
         uint256 _collateralDelta,
         uint256 _sizeDelta,
         bool _isLong
-    ) private returns (uint256, uint256) {
-        bytes32 key = getPositionKey(_account, _token, _isLong);
+    ) private returns (uint256) {
         Position storage position = positions[key];
 
-        uint256 fee = _collectMarginFees(
-            _sizeDelta,
-            position.size,
-            position.entryFundingRate
-        );
         bool hasProfit;
         uint256 adjustedDelta;
 
@@ -460,7 +442,7 @@ contract Vault is
             );
             hasProfit = _hasProfit;
             // get the proportional change in pnl
-            adjustedDelta = _sizeDelta.mul(delta).div(position.size);
+            adjustedDelta = (_sizeDelta * delta) / position.size;
         }
 
         uint256 usdOut;
@@ -476,7 +458,7 @@ contract Vault is
         }
 
         if (!hasProfit && adjustedDelta > 0) {
-            position.collateral = position.collateral.sub(adjustedDelta);
+            position.collateral -= adjustedDelta;
 
             // transfer realised losses to the pool for short positions
             // realised losses for long positions are not transferred here as
@@ -491,79 +473,71 @@ contract Vault is
         // reduce the position's collateral by _collateralDelta
         // transfer _collateralDelta out
         if (_collateralDelta > 0) {
-            usdOut = usdOut.add(_collateralDelta);
-            position.collateral = position.collateral.sub(_collateralDelta);
+            usdOut += _collateralDelta;
+            position.collateral -= _collateralDelta;
         }
 
         // if the position will be closed, then transfer the remaining collateral out
         if (position.size == _sizeDelta) {
-            usdOut = usdOut.add(position.collateral);
+            usdOut += position.collateral;
             position.collateral = 0;
-        }
-
-        // if the usdOut is more than the fee then deduct the fee from the usdOut directly
-        // else deduct the fee from the position's collateral
-        uint256 usdOutAfterFee = usdOut;
-        if (usdOut > fee) {
-            usdOutAfterFee = usdOut.sub(fee);
-        } else {
-            position.collateral = position.collateral.sub(fee);
-            if (_isLong) {
-                _decreasePoolAmount(fee);
-            }
         }
 
         emit UpdatePnl(key, hasProfit, adjustedDelta);
 
-        return (usdOut, usdOutAfterFee);
+        return usdOut;
     }
 
     function _increaseReservedAmount(uint256 _amount) private {
-        reservedAmount = reservedAmount.add(_amount);
+        reservedAmount += _amount;
         require(reservedAmount <= poolAmount, "Vault: reserve exceeds pool");
         emit IncreaseReservedAmount(_amount);
     }
 
     function _decreaseReservedAmount(uint256 _amount) private {
-        reservedAmount = reservedAmount.sub(
-            _amount,
-            "Vault: insufficient reserve"
-        );
+        reservedAmount -= _amount;
         emit DecreaseReservedAmount(_amount);
     }
 
     function _increasePoolAmount(uint256 _amount) private {
-        poolAmount = poolAmount.add(_amount);
+        poolAmount += _amount;
         uint256 balance = IERC20(dollar).balanceOf(address(this));
         require(poolAmount <= balance, "Vault: pool exceeds balance");
         emit IncreasePoolAmount(_amount);
     }
 
     function _decreasePoolAmount(uint256 _amount) private {
-        poolAmount = poolAmount.sub(_amount, "Vault: poolAmount exceeded");
+        require(poolAmount >= _amount, "Vault: poolAmount exceeded");
+        poolAmount -= _amount;
         require(reservedAmount <= poolAmount, "Vault: reserve exceeds pool");
         emit DecreasePoolAmount(_amount);
     }
 
-    function doTransferIn(address _from, uint256 _amount)
-        private
-        returns (uint256)
-    {
-        IERC20 token = IERC20(dollar);
+    function doTransferIn(
+        address _token,
+        address _from,
+        uint256 _amount
+    ) private returns (uint256) {
+        IERC20 token = IERC20(_token);
         uint256 balanceBefore = token.balanceOf(address(this));
         token.transferFrom(_from, address(this), _amount);
         // Calculate the amount that was *actually* transferred
         uint256 balanceAfter = token.balanceOf(address(this));
-        return balanceAfter.sub(balanceBefore, "TOKEN_TRANSFER_IN_OVERFLOW");
+        return balanceAfter - balanceBefore;
     }
 
-    function doTransferOut(address to, uint256 amount) private {
-        IERC20 token = IERC20(dollar);
+    function doTransferOut(
+        address _token,
+        address to,
+        uint256 amount
+    ) private {
+        IERC20 token = IERC20(_token);
         token.transfer(to, amount);
     }
 
     /* ========== EVENTS ========== */
     event SetPlugin(address plugin);
+    event SetErrors(string[] errors);
     event SetWhitelistedToken(address token);
     event IncreaseReservedAmount(uint256 amount);
     event DecreaseReservedAmount(uint256 amount);
@@ -576,8 +550,7 @@ contract Vault is
         uint256 collateralDelta,
         uint256 sizeDelta,
         bool isLong,
-        uint256 price,
-        uint256 fee
+        uint256 price
     );
     event DecreasePosition(
         bytes32 key,
@@ -586,8 +559,7 @@ contract Vault is
         uint256 collateralDelta,
         uint256 sizeDelta,
         bool isLong,
-        uint256 price,
-        uint256 fee
+        uint256 price
     );
     event UpdatePosition(
         bytes32 key,
@@ -609,4 +581,6 @@ contract Vault is
         int256 realisedPnl
     );
     event UpdatePnl(bytes32 key, bool hasProfit, uint256 delta);
+    event BuyUSDG(address account, uint256 usdgAmount);
+    event SellUSDG(address account, uint256 usdgAmount);
 }

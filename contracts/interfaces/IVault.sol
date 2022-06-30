@@ -16,4 +16,12 @@ interface IVault {
         uint256 _sizeDelta,
         bool _isLong
     ) external;
+
+    function decreasePosition(
+        address _account,
+        address _token,
+        uint256 _collateralDelta,
+        uint256 _sizeDelta,
+        bool _isLong
+    ) external;
 }

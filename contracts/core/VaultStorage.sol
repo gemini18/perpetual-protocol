@@ -16,6 +16,7 @@ contract VaultStorage {
 
     address public weth;
     address public dollar;
+    address public usdg;
     address public priceFeed;
 
     /* ========== STATE VARIABLES ========== */

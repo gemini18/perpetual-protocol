@@ -20,7 +20,6 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
         uint256 amountIn;
         uint256 sizeDelta;
         bool isLong;
-        uint256 executionFee;
         uint256 blockTime;
     }
 
@@ -30,7 +29,6 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
         uint256 collateralDelta;
         uint256 sizeDelta;
         bool isLong;
-        uint256 executionFee;
         uint256 blockTime;
     }
     /* ========== ADDRESSES ========== */
@@ -52,10 +50,6 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
 
     mapping(address => uint256) public decreasePositionsIndex;
     mapping(bytes32 => DecreasePositionRequest) public decreasePositionRequests;
-
-    // fees
-    uint256 public depositFee = 5000; // 6 decimals of precision
-    uint256 public minExecutionFee = 4000 wei; // fee to execute position requests
 
     // delay
     uint256 public maxTimeDelay;
@@ -87,16 +81,6 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
 
     /* ========== RESTRICTED FUNCTIONS ========== */
 
-    function setDepositFee(uint256 _depositFee) external onlyOwner {
-        depositFee = _depositFee;
-        emit SetDepositFee(_depositFee);
-    }
-
-    function setMinExecutionFee(uint256 _minExecutionFee) external onlyOwner {
-        minExecutionFee = _minExecutionFee;
-        emit SetMinExecutionFee(_minExecutionFee);
-    }
-
     function setMaxTimeDelay(uint256 _maxTimeDelay) external onlyOwner {
         maxTimeDelay = _maxTimeDelay;
         emit SetMaxTimeDelay(_maxTimeDelay);
@@ -127,13 +111,7 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
         uint256 _amountIn,
         uint256 _sizeDelta,
         bool _isLong
-    ) external payable nonReentrant whenNotPaused {
-        uint256 _executionFee = msg.value;
-        require(
-            _executionFee >= minExecutionFee,
-            "Market::createIncreasePosition Cannot smaller than minExecutionFee"
-        );
-        IWETH(weth).deposit{value: _executionFee}();
+    ) external nonReentrant whenNotPaused {
         address dollar = IVault(vault).dollar();
         IERC20(dollar).safeTransferFrom(msg.sender, address(this), _amountIn);
         address _account = msg.sender;
@@ -146,7 +124,6 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
             _amountIn,
             _sizeDelta,
             _isLong,
-            _executionFee,
             block.timestamp
         );
         bytes32 key = keccak256(abi.encodePacked(_account, index));
@@ -159,7 +136,6 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
             _amountIn,
             _sizeDelta,
             _isLong,
-            _executionFee,
             index,
             block.timestamp
         );
@@ -178,9 +154,8 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
             "Market::executeIncreasePosition Request has expired"
         );
         delete increasePositionRequests[_key];
-        // step 2: calculate fee
 
-        // step 3: create position
+        // step 2: create position
         address dollar = IVault(vault).dollar();
         IERC20(dollar).safeApprove(vault, 0);
         IERC20(dollar).safeApprove(vault, request.amountIn);
@@ -192,10 +167,6 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
             request.isLong
         );
 
-        // step 4: send execution fee
-        IWETH(weth).withdraw(request.executionFee);
-        payable(msg.sender).transfer(request.executionFee);
-
         emit ExecuteIncreasePosition(
             _key,
             request.account,
@@ -203,7 +174,6 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
             request.amountIn,
             request.sizeDelta,
             request.isLong,
-            request.executionFee,
             block.timestamp
         );
     }
@@ -218,14 +188,7 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
         uint256 _collateralDelta,
         uint256 _sizeDelta,
         bool _isLong
-    ) external payable nonReentrant whenNotPaused {
-        uint256 _executionFee = msg.value;
-        require(
-            _executionFee >= minExecutionFee,
-            "Market::createDecreasePosition Cannot smaller than minExecutionFee"
-        );
-        IWETH(weth).deposit{value: _executionFee}();
-
+    ) external nonReentrant whenNotPaused {
         address _account = msg.sender;
         uint256 index = decreasePositionsIndex[_account].add(1);
         decreasePositionsIndex[_account] = index;
@@ -236,7 +199,6 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
             _collateralDelta,
             _sizeDelta,
             _isLong,
-            _executionFee,
             block.timestamp
         );
         bytes32 key = keccak256(abi.encodePacked(_account, index));
@@ -249,7 +211,6 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
             _collateralDelta,
             _sizeDelta,
             _isLong,
-            _executionFee,
             index,
             block.number
         );
@@ -268,13 +229,25 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
             "Market::executeDecreasePosition Request has expired"
         );
         delete decreasePositionRequests[_key];
-        // step 2: calculate fee
 
-        // step 3: decrease position
+        // step 2: decrease position
+        IVault(vault).decreasePosition(
+            request.account,
+            request.token,
+            request.collateralDelta,
+            request.sizeDelta,
+            request.isLong
+        );
 
-        // step 4: send execution fee
-        IWETH(weth).withdraw(request.executionFee);
-        payable(msg.sender).transfer(request.executionFee);
+        emit ExecuteDecreasePosition(
+            _key,
+            request.account,
+            request.token,
+            request.collateralDelta,
+            request.sizeDelta,
+            request.isLong,
+            block.timestamp
+        );
     }
 
     /* ========== INTERNAL FUNCTIONS ========== */
@@ -292,7 +265,6 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
         uint256 amountIn,
         uint256 sizeDelta,
         bool isLong,
-        uint256 executionFee,
         uint256 index,
         uint256 blockTime
     );
@@ -303,7 +275,6 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
         uint256 amountIn,
         uint256 sizeDelta,
         bool isLong,
-        uint256 executionFee,
         uint256 blockTime
     );
     event CreateDecreasePosition(
@@ -313,8 +284,16 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
         uint256 collateralDelta,
         uint256 sizeDelta,
         bool isLong,
-        uint256 executionFee,
         uint256 index,
+        uint256 blockTime
+    );
+    event ExecuteDecreasePosition(
+        bytes32 key,
+        address indexed account,
+        address token,
+        uint256 collateralDelta,
+        uint256 sizeDelta,
+        bool isLong,
         uint256 blockTime
     );
 }

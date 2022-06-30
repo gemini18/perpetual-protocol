@@ -7,8 +7,6 @@ contract VaultErrorReporter {
         NO_ERROR,
         POSISTION_NOT_EXIST,
         LOSSES_EXCEED_COLLATERAL,
-        FEES_EXCEED_COLLATERAL,
-        LIQUIDATION_FEES_EXCEED_COLLATERAL,
         MAX_LEVERAGE_EXCEED
     }
 
@@ -19,6 +17,6 @@ contract VaultErrorReporter {
      * @dev use this when reporting a known error from vault
      */
     function validate(uint256 errCode) internal view {
-        require(errCode != uint256(Error.NO_ERROR), errors[errCode]);
+        require(errCode == uint256(Error.NO_ERROR), errors[errCode]);
     }
 }
