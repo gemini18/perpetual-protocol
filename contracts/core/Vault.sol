@@ -4,14 +4,12 @@ pragma solidity 0.8.4;
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 import "../interfaces/IVaultPriceFeed.sol";
 import "../interfaces/IUSDG.sol";
 import "./VaultStorage.sol";
 import "../common/ErrorReporter.sol";
-import "hardhat/console.sol";
 
 contract Vault is
     VaultStorage,
@@ -144,12 +142,16 @@ contract Vault is
         return (hasProfit, delta);
     }
 
+    /// @notice check liquidate position
+    /// @param _key key of position
+    /// @param _token Address of token.
+    /// @param _isLong long or short position
     function validateLiquidatePosition(
-        bytes32 key,
+        bytes32 _key,
         address _token,
         bool _isLong
     ) public view returns (uint256) {
-        Position storage position = positions[key];
+        Position storage position = positions[_key];
 
         (bool hasProfit, uint256 delta) = getDelta(
             _token,
