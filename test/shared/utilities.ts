@@ -1,5 +1,4 @@
 import { MockProvider } from "ethereum-waffle";
-import { EthereumProvider } from "hardhat/types";
 
 export async function send(
     provider: MockProvider,

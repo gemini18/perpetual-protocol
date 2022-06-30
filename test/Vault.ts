@@ -3,10 +3,9 @@ import { Contract } from "ethers";
 import { parseUnits } from "ethers/lib/utils";
 import { ethers } from "hardhat";
 import { deployContract } from "./shared/fixtures";
-import { increaseTime } from "./shared/utilities";
 import { waffle } from "hardhat";
 
-describe("Market", () => {
+describe("Vault", () => {
   const { provider } = waffle;
   const [, user0, user1, executor] = provider.getWallets();
   let vault: Contract;
@@ -59,9 +58,7 @@ describe("Market", () => {
     await market.setMaxTimeDelay(300); // 5 minutes
   });
 
-  it("should be revert with increase position expired", async () => {
-    await market.setMaxTimeDelay(300); // 5 minutes
-
+  it("should not liquidate if position has profit", async () => {
     await bnbPriceFeed.setLatestAnswer(parseUnits("200", 18));
 
     await usdc.connect(user1).mint(parseUnits("400", 6));
@@ -72,23 +69,43 @@ describe("Market", () => {
     await usdc.connect(user0).mint(parseUnits("200", 6));
     await usdc.connect(user0).approve(market.address, parseUnits("200", 6));
 
-    await market
-      .connect(user0)
-      .createIncreasePosition(
-        bnb.address,
-        parseUnits("200", 6),
-        parseUnits("400", 6),
-        false
-      );
+    await expect(
+      market
+        .connect(user0)
+        .createIncreasePosition(
+          bnb.address,
+          parseUnits("200", 6),
+          parseUnits("400", 6),
+          true
+        )
+    ).to.emit(market, "CreateIncreasePosition");
 
     const requestKey = ethers.utils.keccak256(
       ethers.utils.solidityPack(["address", "uint256"], [user0.address, 1])
     );
 
-    await increaseTime(provider, 600);
     await expect(
       market.connect(executor).executeIncreasePosition(requestKey)
-    ).to.revertedWith("Market::executeIncreasePosition Request has expired");
+    ).to.emit(market, "ExecuteIncreasePosition");
+
+    await bnbPriceFeed.setLatestAnswer(parseUnits("220", 18));
+
+    const positionKey = ethers.utils.keccak256(
+      ethers.utils.solidityPack(
+        ["address", "address", "bool"],
+        [user0.address, bnb.address, true]
+      )
+    );
+
+    expect(
+      await vault.validateLiquidatePosition(positionKey, bnb.address, true)
+    ).to.be.equal(0);
+
+    await expect(
+      vault
+        .connect(executor)
+        .liquidatePosition(user0.address, bnb.address, true)
+    ).to.revertedWith("Vault: position cannot be liquidated");
   });
 
   it("should execute", async () => {
@@ -121,20 +138,24 @@ describe("Market", () => {
       market.connect(executor).executeIncreasePosition(requestKey)
     ).to.emit(market, "ExecuteIncreasePosition");
 
-    await bnbPriceFeed.setLatestAnswer(parseUnits("220", 18));
+    await bnbPriceFeed.setLatestAnswer(parseUnits("100", 18));
 
-    await expect(
-      market
-        .connect(user0)
-        .createDecreasePosition(bnb.address, 0, parseUnits("400", 6), true)
-    ).to.emit(market, "CreateDecreasePosition");
-
-    await expect(
-      market.connect(executor).executeDecreasePosition(requestKey)
-    ).to.emit(market, "ExecuteDecreasePosition");
-
-    expect(await usdc.balanceOf(user0.address)).to.be.equal(
-      parseUnits("240", 6)
+    const positionKey = ethers.utils.keccak256(
+      ethers.utils.solidityPack(
+        ["address", "address", "bool"],
+        [user0.address, bnb.address, true]
+      )
     );
+
+    expect(
+      await vault.validateLiquidatePosition(positionKey, bnb.address, true)
+    ).to.be.equal(2);
+
+    await vault
+      .connect(executor)
+      .liquidatePosition(user0.address, bnb.address, true);
+
+    expect(await usdc.balanceOf(user0.address)).to.be.equal(0);
+    expect((await vault.positions(positionKey)).size).to.be.equal(0);
   });
 });

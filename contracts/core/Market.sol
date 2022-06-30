@@ -11,7 +11,6 @@ import "../interfaces/IWETH.sol";
 import "../interfaces/IVault.sol";
 
 contract Market is Ownable, ReentrancyGuard, Pausable {
-    using SafeMath for uint256;
     using SafeERC20 for IERC20;
 
     struct IncreasePositionRequest {
@@ -38,8 +37,6 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
 
     /* ========== STATE VARIABLES ========== */
 
-    mapping(address => bool) public executors;
-
     // Constants for various precisions
     uint256 private constant PRICE_PRECISION = 1e18;
     uint256 private constant PRECISION = 1e6;
@@ -54,8 +51,6 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
     // delay
     uint256 public maxTimeDelay;
 
-    /* ========== MODIFIERS ========== */
-
     /* ========== CONSTRUCTORS ========== */
 
     constructor(address _vault, address _weth) {
@@ -69,26 +64,11 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
         // only accept ETH via fallback from the WETH contract
     }
 
-    /* ========== VIEWS ========== */
-
-    function getRequestKey(address _account, uint256 _index)
-        public
-        pure
-        returns (bytes32)
-    {
-        return keccak256(abi.encodePacked(_account, _index));
-    }
-
     /* ========== RESTRICTED FUNCTIONS ========== */
 
     function setMaxTimeDelay(uint256 _maxTimeDelay) external onlyOwner {
         maxTimeDelay = _maxTimeDelay;
         emit SetMaxTimeDelay(_maxTimeDelay);
-    }
-
-    function setExecutor(address executor) external onlyOwner {
-        executors[executor] = true;
-        emit SetExecutor(executor);
     }
 
     function pause() external onlyOwner {
@@ -115,7 +95,7 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
         address dollar = IVault(vault).dollar();
         IERC20(dollar).safeTransferFrom(msg.sender, address(this), _amountIn);
         address _account = msg.sender;
-        uint256 index = increasePositionsIndex[_account].add(1);
+        uint256 index = increasePositionsIndex[_account] + 1;
         increasePositionsIndex[_account] = index;
 
         IncreasePositionRequest memory request = IncreasePositionRequest(
@@ -150,7 +130,7 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
             return;
         }
         require(
-            request.blockTime.add(maxTimeDelay) > block.timestamp,
+            request.blockTime + maxTimeDelay > block.timestamp,
             "Market::executeIncreasePosition Request has expired"
         );
         delete increasePositionRequests[_key];
@@ -190,7 +170,7 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
         bool _isLong
     ) external nonReentrant whenNotPaused {
         address _account = msg.sender;
-        uint256 index = decreasePositionsIndex[_account].add(1);
+        uint256 index = decreasePositionsIndex[_account] + 1;
         decreasePositionsIndex[_account] = index;
 
         DecreasePositionRequest memory request = DecreasePositionRequest(
@@ -225,7 +205,7 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
             return;
         }
         require(
-            request.blockTime.add(maxTimeDelay) > block.timestamp,
+            request.blockTime + maxTimeDelay > block.timestamp,
             "Market::executeDecreasePosition Request has expired"
         );
         delete decreasePositionRequests[_key];
