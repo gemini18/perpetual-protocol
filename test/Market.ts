@@ -88,7 +88,7 @@ describe("Market", () => {
     await increaseTime(provider, 600);
     await expect(
       market.connect(executor).executeIncreasePosition(requestKey)
-    ).to.revertedWith("Market::executeIncreasePosition Request has expired");
+    ).to.be.revertedWith("Market::executeIncreasePosition Request has expired");
   });
 
   it("should execute", async () => {

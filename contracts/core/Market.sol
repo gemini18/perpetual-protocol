@@ -93,8 +93,8 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
         bool _isLong
     ) external nonReentrant whenNotPaused {
         address dollar = IVault(vault).dollar();
-        IERC20(dollar).safeTransferFrom(msg.sender, address(this), _amountIn);
         address _account = msg.sender;
+        IERC20(dollar).safeTransferFrom(_account, address(this), _amountIn);
         uint256 index = increasePositionsIndex[_account] + 1;
         increasePositionsIndex[_account] = index;
 
