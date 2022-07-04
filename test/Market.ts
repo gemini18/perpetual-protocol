@@ -18,13 +18,6 @@ describe("Market", () => {
   let vaultPriceFeed: Contract;
   let weth: Contract;
 
-  const messages = [
-    "NO_ERROR",
-    "POSISTION_NOT_EXIST",
-    "LOSSES_EXCEED_COLLATERAL",
-    "MAX_LEVERAGE_EXCEED",
-  ];
-
   beforeEach(async () => {
     bnb = await deployContract("MockERC20", ["BNB", "BNB", 18]);
     bnbPriceFeed = await deployContract("MockPriceFeed", [18]);
@@ -43,8 +36,6 @@ describe("Market", () => {
       usdg.address,
       vaultPriceFeed.address,
     ]);
-
-    await vault.setErrors(messages);
 
     market = await deployContract("Market", [vault.address, weth.address]);
 

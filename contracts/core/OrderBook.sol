@@ -82,8 +82,8 @@ contract OrderBook is Ownable, Pausable, ReentrancyGuard {
             ? IVault(vault).getMaxPrice(_indexToken)
             : IVault(vault).getMinPrice(_indexToken);
         bool isPriceValid = _triggerAboveThreshold
-            ? currentPrice > _triggerPrice
-            : currentPrice < _triggerPrice;
+            ? currentPrice >= _triggerPrice
+            : currentPrice <= _triggerPrice;
         if (_raise) {
             require(isPriceValid, "OrderBook: invalid price for execution");
         }
@@ -93,8 +93,8 @@ contract OrderBook is Ownable, Pausable, ReentrancyGuard {
     /* ========== MUTATIVE FUNCTIONS ========== */
 
     function createIncreaseOrder(
-        uint256 _amountIn,
         address _token,
+        uint256 _amountIn,
         uint256 _sizeDelta,
         bool _isLong,
         uint256 _triggerPrice,
@@ -173,11 +173,12 @@ contract OrderBook is Ownable, Pausable, ReentrancyGuard {
         );
     }
 
-    function executeIncreaseOrder(address _address, uint256 _orderIndex)
+    function executeIncreaseOrder(address _account, uint256 _orderIndex)
         external
         nonReentrant
+        whenNotPaused
     {
-        IncreaseOrder memory order = increaseOrders[_address][_orderIndex];
+        IncreaseOrder memory order = increaseOrders[_account][_orderIndex];
         require(order.account != address(0), "OrderBook: non-existent order");
 
         // increase long should use max price
@@ -190,10 +191,11 @@ contract OrderBook is Ownable, Pausable, ReentrancyGuard {
             true
         );
 
-        delete increaseOrders[_address][_orderIndex];
+        delete increaseOrders[_account][_orderIndex];
 
         address dollar = IVault(vault).dollar();
-        IERC20(dollar).safeTransfer(vault, order.amount);
+        IERC20(dollar).safeApprove(vault, 0);
+        IERC20(dollar).safeApprove(vault, order.amount);
 
         IVault(vault).increasePosition(
             order.account,
@@ -212,6 +214,121 @@ contract OrderBook is Ownable, Pausable, ReentrancyGuard {
             order.isLong,
             order.triggerPrice,
             order.triggerAboveThreshold
+        );
+    }
+
+    function createDecreaseOrder(
+        address _token,
+        uint256 _sizeDelta,
+        uint256 _collateralDelta,
+        bool _isLong,
+        uint256 _triggerPrice,
+        bool _triggerAboveThreshold
+    ) external nonReentrant {
+        address _account = msg.sender;
+        uint256 _index = decreaseOrdersIndex[_account] + 1;
+        decreaseOrdersIndex[_account] = _index;
+        DecreaseOrder memory order = DecreaseOrder(
+            _account,
+            _token,
+            _collateralDelta,
+            _sizeDelta,
+            _isLong,
+            _triggerPrice,
+            _triggerAboveThreshold
+        );
+        decreaseOrders[_account][_index] = order;
+
+        emit CreateDecreaseOrder(
+            _account,
+            _index,
+            _token,
+            _collateralDelta,
+            _sizeDelta,
+            _isLong,
+            _triggerPrice,
+            _triggerAboveThreshold
+        );
+    }
+
+    function executeDecreaseOrder(address _account, uint256 _orderIndex)
+        external
+        nonReentrant
+        whenNotPaused
+    {
+        DecreaseOrder memory order = decreaseOrders[_account][_orderIndex];
+        require(order.account != address(0), "OrderBook: non-existent order");
+
+        validatePositionOrderPrice(
+            order.triggerAboveThreshold,
+            order.triggerPrice,
+            order.token,
+            !order.isLong,
+            true
+        );
+
+        delete decreaseOrders[_account][_orderIndex];
+
+        IVault(vault).decreasePosition(
+            order.account,
+            order.token,
+            order.collateralDelta,
+            order.sizeDelta,
+            order.isLong
+        );
+
+        emit ExecuteDecreaseOrder(
+            order.account,
+            _orderIndex,
+            order.token,
+            order.collateralDelta,
+            order.sizeDelta,
+            order.isLong,
+            order.triggerPrice,
+            order.triggerAboveThreshold
+        );
+    }
+
+    function cancelDecreaseOrder(uint256 _orderIndex) external nonReentrant {
+        DecreaseOrder memory order = decreaseOrders[msg.sender][_orderIndex];
+        require(order.account != address(0), "OrderBook: non-existent order");
+
+        delete decreaseOrders[msg.sender][_orderIndex];
+
+        emit CancelDecreaseOrder(
+            order.account,
+            _orderIndex,
+            order.token,
+            order.collateralDelta,
+            order.sizeDelta,
+            order.isLong,
+            order.triggerPrice,
+            order.triggerAboveThreshold
+        );
+    }
+
+    function updateDecreaseOrder(
+        uint256 _orderIndex,
+        uint256 _collateralDelta,
+        uint256 _sizeDelta,
+        uint256 _triggerPrice,
+        bool _triggerAboveThreshold
+    ) external nonReentrant {
+        DecreaseOrder storage order = decreaseOrders[msg.sender][_orderIndex];
+        require(order.account != address(0), "OrderBook: non-existent order");
+
+        order.triggerPrice = _triggerPrice;
+        order.triggerAboveThreshold = _triggerAboveThreshold;
+        order.sizeDelta = _sizeDelta;
+        order.collateralDelta = _collateralDelta;
+
+        emit UpdateDecreaseOrder(
+            msg.sender,
+            _orderIndex,
+            _collateralDelta,
+            _sizeDelta,
+            _triggerPrice,
+            _triggerAboveThreshold
         );
     }
 
@@ -251,6 +368,44 @@ contract OrderBook is Ownable, Pausable, ReentrancyGuard {
         uint256 amount,
         uint256 sizeDelta,
         bool isLong,
+        uint256 triggerPrice,
+        bool triggerAboveThreshold
+    );
+    event CreateDecreaseOrder(
+        address indexed account,
+        uint256 orderIndex,
+        address token,
+        uint256 collateralDelta,
+        uint256 sizeDelta,
+        bool isLong,
+        uint256 triggerPrice,
+        bool triggerAboveThreshold
+    );
+    event ExecuteDecreaseOrder(
+        address indexed account,
+        uint256 orderIndex,
+        address token,
+        uint256 collateralDelta,
+        uint256 sizeDelta,
+        bool isLong,
+        uint256 triggerPrice,
+        bool triggerAboveThreshold
+    );
+    event CancelDecreaseOrder(
+        address indexed account,
+        uint256 orderIndex,
+        address token,
+        uint256 collateralDelta,
+        uint256 sizeDelta,
+        bool isLong,
+        uint256 triggerPrice,
+        bool triggerAboveThreshold
+    );
+    event UpdateDecreaseOrder(
+        address indexed account,
+        uint256 orderIndex,
+        uint256 collateralDelta,
+        uint256 sizeDelta,
         uint256 triggerPrice,
         bool triggerAboveThreshold
     );

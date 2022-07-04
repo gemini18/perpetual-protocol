@@ -9,15 +9,8 @@ import "@openzeppelin/contracts/security/Pausable.sol";
 import "../interfaces/IVaultPriceFeed.sol";
 import "../interfaces/IUSDG.sol";
 import "./VaultStorage.sol";
-import "../common/ErrorReporter.sol";
 
-contract Vault is
-    VaultStorage,
-    VaultErrorReporter,
-    Ownable,
-    Pausable,
-    ReentrancyGuard
-{
+contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     /// @notice Constants for various precisions
@@ -67,13 +60,6 @@ contract Vault is
     function setWhitelistedToken(address token) external onlyOwner {
         whitelistedTokens[token] = true;
         emit SetWhitelistedToken(token);
-    }
-
-    function setErrors(string[] memory messages) external onlyOwner {
-        for (uint256 i = 0; i < messages.length; i++) {
-            errors[i] = messages[i];
-        }
-        emit SetErrors(messages);
     }
 
     function pause() external onlyOwner {
@@ -146,12 +132,17 @@ contract Vault is
     /// @param _key key of position
     /// @param _token Address of token.
     /// @param _isLong long or short position
-    function validateLiquidatePosition(
+    function liquidatePositionAllowed(
         bytes32 _key,
         address _token,
-        bool _isLong
-    ) public view returns (uint256) {
+        bool _isLong,
+        bool _raise
+    ) public view returns (bool allowed) {
         Position storage position = positions[_key];
+
+        if (position.size == 0) {
+            if (_raise) revert("Vault: non-existent position");
+        }
 
         (bool hasProfit, uint256 delta) = getDelta(
             _token,
@@ -160,8 +151,10 @@ contract Vault is
             _isLong
         );
 
-        if (!hasProfit && position.collateral <= delta)
-            return uint256(Error.LOSSES_EXCEED_COLLATERAL);
+        if (!hasProfit && position.collateral <= delta) {
+            allowed = true;
+            if (_raise) revert("Vault: LOSSES_EXCEED_COLLATERAL");
+        }
 
         uint256 remainingCollateral = position.collateral;
 
@@ -169,10 +162,13 @@ contract Vault is
             remainingCollateral = position.collateral - delta;
         }
 
-        if (position.size / remainingCollateral > maxLeverage) {
-            return uint256(Error.MAX_LEVERAGE_EXCEED);
+        if (
+            remainingCollateral != 0 &&
+            (position.size / remainingCollateral) > maxLeverage
+        ) {
+            allowed = true;
+            if (_raise) revert("Vault: MAX_LEVERAGE_EXCEED");
         }
-        return uint256(Error.NO_ERROR);
     }
 
     /* ========== MUTATIVE FUNCTIONS ========== */
@@ -284,8 +280,7 @@ contract Vault is
         );
 
         // validate liquidation
-        uint256 result = validateLiquidatePosition(key, _token, _isLong);
-        validate(result);
+        liquidatePositionAllowed(key, _token, _isLong, true);
 
         // update reserveAmount = reserveAmount + _sizeDelta
         position.reserveAmount += _sizeDelta;
@@ -362,8 +357,7 @@ contract Vault is
                 "Vault: Size must be more than collateral"
             );
             // validate liquidation
-            uint256 result = validateLiquidatePosition(key, _token, _isLong);
-            validate(result);
+            liquidatePositionAllowed(key, _token, _isLong, true);
 
             emit DecreasePosition(
                 key,
@@ -423,11 +417,8 @@ contract Vault is
         Position storage position = positions[key];
         require(position.size > 0, "Vault: empty position");
 
-        uint256 result = validateLiquidatePosition(key, _token, _isLong);
-        require(
-            result != uint256(Error.NO_ERROR),
-            "Vault: position cannot be liquidated"
-        );
+        bool allowed = liquidatePositionAllowed(key, _token, _isLong, false);
+        require(allowed, "Vault: position cannot be liquidated");
 
         decreaseReservedAmount(position.reserveAmount);
 

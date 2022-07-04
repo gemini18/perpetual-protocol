@@ -17,13 +17,6 @@ describe("Vault", () => {
   let vaultPriceFeed: Contract;
   let weth: Contract;
 
-  const messages = [
-    "NO_ERROR",
-    "POSISTION_NOT_EXIST",
-    "LOSSES_EXCEED_COLLATERAL",
-    "MAX_LEVERAGE_EXCEED",
-  ];
-
   beforeEach(async () => {
     bnb = await deployContract("MockERC20", ["BNB", "BNB", 18]);
     bnbPriceFeed = await deployContract("MockPriceFeed", [18]);
@@ -42,8 +35,6 @@ describe("Vault", () => {
       usdg.address,
       vaultPriceFeed.address,
     ]);
-
-    await vault.setErrors(messages);
 
     market = await deployContract("Market", [vault.address, weth.address]);
 
@@ -98,8 +89,13 @@ describe("Vault", () => {
     );
 
     expect(
-      await vault.validateLiquidatePosition(positionKey, bnb.address, true)
-    ).to.be.equal(0);
+      await vault.liquidatePositionAllowed(
+        positionKey,
+        bnb.address,
+        true,
+        false
+      )
+    ).to.be.equal(false);
 
     await expect(
       vault
@@ -148,8 +144,13 @@ describe("Vault", () => {
     );
 
     expect(
-      await vault.validateLiquidatePosition(positionKey, bnb.address, true)
-    ).to.be.equal(2);
+      await vault.liquidatePositionAllowed(
+        positionKey,
+        bnb.address,
+        true,
+        false
+      )
+    ).to.be.equal(true);
 
     await vault
       .connect(executor)
