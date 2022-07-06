@@ -15,7 +15,8 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
 
     struct IncreasePositionRequest {
         address account;
-        address token;
+        address collateralToken;
+        address market;
         uint256 amountIn;
         uint256 sizeDelta;
         bool isLong;
@@ -24,7 +25,8 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
 
     struct DecreasePositionRequest {
         address account;
-        address token;
+        address collateralToken;
+        address market;
         uint256 collateralDelta;
         uint256 sizeDelta;
         bool isLong;
@@ -82,25 +84,31 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
     /* ========== MUTATIVE FUNCTIONS ========== */
 
     /// @notice Create increase position request
-    /// @param _token Address of token.
+    /// @param _collateralToken Address of collateral token.
+    /// @param _market Address of market.
     /// @param _amountIn Amount of collateral input.
     /// @param _sizeDelta : Size of position.
     /// @param _isLong : long or short position.
     function createIncreasePosition(
-        address _token,
+        address _collateralToken,
+        address _market,
         uint256 _amountIn,
         uint256 _sizeDelta,
         bool _isLong
     ) external nonReentrant whenNotPaused {
-        address dollar = IVault(vault).dollar();
         address _account = msg.sender;
-        IERC20(dollar).safeTransferFrom(_account, address(this), _amountIn);
+        IERC20(_collateralToken).safeTransferFrom(
+            _account,
+            address(this),
+            _amountIn
+        );
         uint256 index = increasePositionsIndex[_account] + 1;
         increasePositionsIndex[_account] = index;
 
         IncreasePositionRequest memory request = IncreasePositionRequest(
             _account,
-            _token,
+            _collateralToken,
+            _market,
             _amountIn,
             _sizeDelta,
             _isLong,
@@ -112,12 +120,118 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
         emit CreateIncreasePosition(
             key,
             _account,
-            _token,
+            _collateralToken,
+            _market,
             _amountIn,
             _sizeDelta,
             _isLong,
             index,
             block.timestamp
+        );
+    }
+
+    /// @notice Create increase position request
+    /// @param _market Address of market.
+    /// @param _sizeDelta : Size of position.
+    /// @param _isLong : long or short position.
+    function createIncreasePositionETH(
+        address _market,
+        uint256 _sizeDelta,
+        bool _isLong
+    ) external payable nonReentrant whenNotPaused {
+        uint256 amountIn = msg.value;
+        require(amountIn > 0, "Market: invalid msg.value");
+        IWETH(weth).deposit{value: amountIn}();
+        address _account = msg.sender;
+        uint256 index = increasePositionsIndex[_account] + 1;
+        increasePositionsIndex[_account] = index;
+
+        IncreasePositionRequest memory request = IncreasePositionRequest(
+            _account,
+            weth,
+            _market,
+            amountIn,
+            _sizeDelta,
+            _isLong,
+            block.timestamp
+        );
+        bytes32 key = keccak256(abi.encodePacked(_account, index));
+        increasePositionRequests[key] = request;
+
+        emit CreateIncreasePosition(
+            key,
+            _account,
+            weth,
+            _market,
+            amountIn,
+            _sizeDelta,
+            _isLong,
+            index,
+            block.timestamp
+        );
+    }
+
+    /// @notice Cancel increase position request
+    /// @param _key key of increase position request.
+    function cancelIncreasePosition(bytes32 _key) public nonReentrant {
+        IncreasePositionRequest memory request = increasePositionRequests[_key];
+        if (request.account == address(0)) {
+            return;
+        }
+        require(
+            request.blockTime + maxTimeDelay > block.timestamp,
+            "Market: Request has expired"
+        );
+
+        delete increasePositionRequests[_key];
+
+        IERC20(request.collateralToken).safeTransfer(
+            request.account,
+            request.amountIn
+        );
+
+        emit CancelIncreasePosition(
+            request.account,
+            request.collateralToken,
+            request.market,
+            request.amountIn,
+            request.sizeDelta,
+            request.isLong,
+            block.number
+        );
+    }
+
+    /// @notice Cancel increase position ETH request
+    /// @param _key key of increase position request.
+    function cancelIncreasePositionETH(bytes32 _key) public nonReentrant {
+        IncreasePositionRequest memory request = increasePositionRequests[_key];
+        if (request.account == address(0)) {
+            return;
+        }
+        require(
+            request.blockTime + maxTimeDelay > block.timestamp,
+            "Market: Request has expired"
+        );
+
+        require(
+            request.collateralToken == weth,
+            "Market: Collateral must be ETH"
+        );
+
+        delete increasePositionRequests[_key];
+
+        IWETH(weth).withdraw(request.amountIn);
+
+        payable(request.account).transfer(request.amountIn);
+
+        emit CancelIncreasePosition(
+            request.account,
+            request.collateralToken,
+            request.market,
+            request.amountIn,
+            request.sizeDelta,
+            request.isLong,
+            block.number
         );
     }
 
@@ -131,17 +245,17 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
         }
         require(
             request.blockTime + maxTimeDelay > block.timestamp,
-            "Market::executeIncreasePosition Request has expired"
+            "Market: Request has expired"
         );
         delete increasePositionRequests[_key];
 
         // step 2: create position
-        address dollar = IVault(vault).dollar();
-        IERC20(dollar).safeApprove(vault, 0);
-        IERC20(dollar).safeApprove(vault, request.amountIn);
+        IERC20(request.collateralToken).safeApprove(vault, 0);
+        IERC20(request.collateralToken).safeApprove(vault, request.amountIn);
         IVault(vault).increasePosition(
             request.account,
-            request.token,
+            request.collateralToken,
+            request.market,
             request.amountIn,
             request.sizeDelta,
             request.isLong
@@ -150,7 +264,8 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
         emit ExecuteIncreasePosition(
             _key,
             request.account,
-            request.token,
+            request.collateralToken,
+            request.market,
             request.amountIn,
             request.sizeDelta,
             request.isLong,
@@ -159,12 +274,14 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
     }
 
     /// @notice Create decrease position request
-    /// @param _token Address of index token.
+    /// @param _collateralToken Address of index token.
+    /// @param _market Address of market.
     /// @param _collateralDelta Amount of collateral decrease.
     /// @param _sizeDelta : Size of position.
     /// @param _isLong : long or short position.
     function createDecreasePosition(
-        address _token,
+        address _collateralToken,
+        address _market,
         uint256 _collateralDelta,
         uint256 _sizeDelta,
         bool _isLong
@@ -175,7 +292,8 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
 
         DecreasePositionRequest memory request = DecreasePositionRequest(
             _account,
-            _token,
+            _collateralToken,
+            _market,
             _collateralDelta,
             _sizeDelta,
             _isLong,
@@ -187,7 +305,8 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
         emit CreateDecreasePosition(
             key,
             _account,
-            _token,
+            _collateralToken,
+            _market,
             _collateralDelta,
             _sizeDelta,
             _isLong,
@@ -213,7 +332,8 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
         // step 2: decrease position
         IVault(vault).decreasePosition(
             request.account,
-            request.token,
+            request.collateralToken,
+            request.market,
             request.collateralDelta,
             request.sizeDelta,
             request.isLong
@@ -222,7 +342,8 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
         emit ExecuteDecreasePosition(
             _key,
             request.account,
-            request.token,
+            request.collateralToken,
+            request.market,
             request.collateralDelta,
             request.sizeDelta,
             request.isLong,
@@ -241,17 +362,28 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
     event CreateIncreasePosition(
         bytes32 key,
         address indexed account,
-        address token,
+        address collateralToken,
+        address market,
         uint256 amountIn,
         uint256 sizeDelta,
         bool isLong,
         uint256 index,
         uint256 blockTime
     );
+    event CancelIncreasePosition(
+        address indexed account,
+        address collateralToken,
+        address market,
+        uint256 amountIn,
+        uint256 sizeDelta,
+        bool isLong,
+        uint256 blockTime
+    );
     event ExecuteIncreasePosition(
         bytes32 key,
         address indexed account,
-        address token,
+        address collateralToken,
+        address market,
         uint256 amountIn,
         uint256 sizeDelta,
         bool isLong,
@@ -260,7 +392,8 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
     event CreateDecreasePosition(
         bytes32 key,
         address indexed account,
-        address token,
+        address collateralToken,
+        address market,
         uint256 collateralDelta,
         uint256 sizeDelta,
         bool isLong,
@@ -270,7 +403,8 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
     event ExecuteDecreasePosition(
         bytes32 key,
         address indexed account,
-        address token,
+        address collateralToken,
+        address market,
         uint256 collateralDelta,
         uint256 sizeDelta,
         bool isLong,

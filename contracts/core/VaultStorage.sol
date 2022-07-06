@@ -10,25 +10,39 @@ contract VaultStorage {
         uint256 entryFundingRate;
         uint256 reserveAmount;
         int256 realisedPnl;
+        uint256 lastIncreasedTime;
+    }
+
+    struct Market {
+        /// @notice Whether or not this market is listed
+        bool isListed;
     }
 
     /* ========== ADDRESSES ========== */
 
     address public weth;
-    address public dollar;
     address public usdg;
     address public priceFeed;
 
     /* ========== STATE VARIABLES ========== */
 
     mapping(address => bool) public plugins;
-    mapping(address => bool) public whitelistedTokens;
+    mapping(address => Market) public markets;
 
-    // poolAmounts tracks the number of received dollar that can be used for leverage
-    uint256 public poolAmount;
+    address[] public allMarkets;
 
-    // reservedAmounts tracks the number of dollar reserved for open leverage positions
-    uint256 public reservedAmount;
+    // poolAmounts tracks the number of received tokens that can be used for leverage
+    mapping(address => uint256) public poolAmounts;
+
+    // reservedAmounts tracks the number of tokens reserved for open leverage positions
+    mapping(address => uint256) public reservedAmounts;
+
+    // guaranteedUsd tracks the amount of USD that is "guaranteed" by opened leverage positions
+    // this value is used to calculate the redemption values for selling of USDG
+    // this is an estimated amount, it is possible for the actual guaranteed value to be lower
+    // in the case of sudden price decreases, the guaranteed value should be corrected
+    // after liquidations are carried out
+    mapping(address => uint256) public guaranteedUsd;
 
     // positions tracks all open positions
     mapping(bytes32 => Position) public positions;
@@ -37,13 +51,15 @@ contract VaultStorage {
     uint256 public constant FUNDING_INTERVAL = 3600 * 8; // 8 hours
     uint256 public fundingRateFactor; // 6 decimals of precision
     uint256 public cumulativeFundingRate; // tracks the funding rates based on utilization
-    uint256 public lastRefreshFundingRateTimestamp;
+    mapping(address => uint256) public lastRefreshFundingRateTimestamp; // tracks the last time funding was updated for a token
 
     // fees
     uint256 public liquidationFee;
     uint256 public marginFee = 1000; // 0.1%
     uint256 public feeReserves;
 
-    //leverage
-    uint256 public maxLeverage = 50000000; // 50x
+    // short
+    mapping(address => uint256) public globalShortSizes;
+    mapping(address => uint256) public globalShortAveragePrices;
+    mapping(address => uint256) public maxGlobalShortSizes;
 }
