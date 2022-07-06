@@ -153,7 +153,7 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
 
         if (!hasProfit && position.collateral <= delta) {
             allowed = true;
-            if (_raise) revert("Vault: LOSSES_EXCEED_COLLATERAL");
+            if (_raise) revert("Vault: losses exceed collateral");
         }
 
         uint256 remainingCollateral = position.collateral;
@@ -162,20 +162,17 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
             remainingCollateral = position.collateral - delta;
         }
 
-        if (
-            remainingCollateral != 0 &&
-            (position.size / remainingCollateral) > maxLeverage
-        ) {
+        if (remainingCollateral * maxLeverage < position.size * PRECISION) {
             allowed = true;
-            if (_raise) revert("Vault: MAX_LEVERAGE_EXCEED");
+            if (_raise) revert("Vault: max leverage exceeded");
         }
     }
 
     /* ========== MUTATIVE FUNCTIONS ========== */
 
     function buyUSDG(uint256 _amount) external nonReentrant returns (uint256) {
-        uint256 actualAmount = doTransferIn(dollar, msg.sender, _amount);
         refreshCumulativeFundingRate();
+        uint256 actualAmount = doTransferIn(dollar, msg.sender, _amount);
 
         uint256 missingDecimals = 18 +
             IUSDG(usdg).decimals() -
@@ -286,7 +283,10 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
         position.reserveAmount += _sizeDelta;
         increaseReservedAmount(_sizeDelta);
 
-        increasePoolAmount(actualAmount);
+        if (_isLong) {
+            // treat the deposited collateral as part of the pool
+            increasePoolAmount(actualAmount);
+        }
 
         emit IncreasePosition(
             key,
@@ -402,7 +402,9 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
         }
 
         if (usdOut > 0) {
-            decreasePoolAmount(usdOut);
+            if (_isLong) {
+                decreasePoolAmount(usdOut);
+            }
             doTransferOut(dollar, _account, usdOut);
         }
     }
@@ -423,6 +425,10 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
         decreaseReservedAmount(position.reserveAmount);
 
         uint256 markPrice = _isLong ? getMinPrice(_token) : getMaxPrice(_token);
+
+        if (!_isLong) {
+            increasePoolAmount(position.collateral);
+        }
 
         delete positions[key];
 
@@ -472,12 +478,24 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
         if (hasProfit && adjustedDelta > 0) {
             usdOut = adjustedDelta;
             position.realisedPnl = position.realisedPnl + int256(adjustedDelta);
+
+            // pay out realised profits from the pool amount for short positions
+            if (!_isLong) {
+                decreasePoolAmount(adjustedDelta);
+            }
         }
 
         if (!hasProfit && adjustedDelta > 0) {
             position.collateral -= adjustedDelta;
 
             position.realisedPnl = position.realisedPnl - int256(adjustedDelta);
+
+            // transfer realised losses to the pool for short positions
+            // realised losses for long positions are not transferred here as
+            // _increasePoolAmount was already called in increasePosition for longs
+            if (!_isLong) {
+                increasePoolAmount(adjustedDelta);
+            }
         }
 
         // reduce the position's collateral by _collateralDelta

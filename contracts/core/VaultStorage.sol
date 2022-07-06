@@ -45,5 +45,5 @@ contract VaultStorage {
     uint256 public feeReserves;
 
     //leverage
-    uint256 public maxLeverage = 50; // 50x
+    uint256 public maxLeverage = 50000000; // 50x
 }
