@@ -270,14 +270,12 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
 
     /// @notice increase position
     /// @param _account address of account increase position
-    /// @param _collateralToken address of collateral token
     /// @param _market address of market
     /// @param _amountIn amount of collateral token increase position
     /// @param _sizeDelta size delta in usd to increase position
     /// @param _isLong long or short position
     function increasePosition(
         address _account,
-        address _collateralToken,
         address _market,
         uint256 _amountIn,
         uint256 _sizeDelta,
@@ -290,16 +288,10 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
         onlySupportMarkets(_market)
     {
         refreshCumulativeFundingRate(_market);
-        bytes32 key = keccak256(
-            abi.encodePacked(_account, _collateralToken, _market, _isLong)
-        );
+        bytes32 key = keccak256(abi.encodePacked(_account, _market, _isLong));
         Position storage position = positions[key];
 
-        uint256 actualAmount = doTransferIn(
-            _collateralToken,
-            msg.sender,
-            _amountIn
-        );
+        uint256 actualAmount = doTransferIn(_market, msg.sender, _amountIn);
 
         uint256 markPrice = _isLong
             ? getMaxPrice(_market)
@@ -341,11 +333,7 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
         position.size += _sizeDelta;
         position.lastIncreasedTime = block.timestamp;
         // calculte collateral of position: collateral = collateral + actualAmountUsd;
-        uint256 actualAmountUsd = tokenToUsd(
-            _collateralToken,
-            actualAmount,
-            false
-        );
+        uint256 actualAmountUsd = tokenToUsd(_market, actualAmount, false);
         position.collateral += actualAmountUsd;
 
         require(position.size > 0, "Vault: invalid position size");
@@ -359,18 +347,18 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
 
         // update reserveAmount = reserveAmount + reserveDelta
         // reserve tokens to pay profits on the position
-        uint256 reserveDelta = usdToToken(_collateralToken, _sizeDelta, true);
+        uint256 reserveDelta = usdToToken(_market, _sizeDelta, true);
         position.reserveAmount += reserveDelta;
-        increaseReservedAmount(_collateralToken, _sizeDelta);
+        increaseReservedAmount(_market, _sizeDelta);
 
         if (_isLong) {
             // guaranteedUsd stores the sum of (position.size - position.collateral) for all positions
             // if a fee is charged on the collateral then guaranteedUsd should be increased by that fee amount
             // since (position.size - position.collateral) would have increased by `fee`
-            increaseGuaranteedUsd(_collateralToken, _sizeDelta);
-            decreaseGuaranteedUsd(_collateralToken, actualAmountUsd);
+            increaseGuaranteedUsd(_market, _sizeDelta);
+            decreaseGuaranteedUsd(_market, actualAmountUsd);
             // treat the deposited collateral as part of the pool
-            increasePoolAmount(_collateralToken, actualAmount);
+            increasePoolAmount(_market, actualAmount);
         } else {
             if (globalShortSizes[_market] == 0) {
                 globalShortAveragePrices[_market] = markPrice;
@@ -405,7 +393,6 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
         emit IncreasePosition(
             key,
             _account,
-            _collateralToken,
             _market,
             actualAmount,
             _sizeDelta,
@@ -426,14 +413,12 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
 
     /// @notice decrease position
     /// @param _account address of account decrease position
-    /// @param _collateralToken address of collateral token
     /// @param _market address of market
     /// @param _collateralDelta amount of collateral token decrease position
     /// @param _sizeDelta size delta in usd to decrease position
     /// @param _isLong long or short position
     function decreasePosition(
         address _account,
-        address _collateralToken,
         address _market,
         uint256 _collateralDelta,
         uint256 _sizeDelta,
@@ -446,9 +431,7 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
         onlySupportMarkets(_market)
     {
         refreshCumulativeFundingRate(_market);
-        bytes32 key = keccak256(
-            abi.encodePacked(_account, _collateralToken, _market, _isLong)
-        );
+        bytes32 key = keccak256(abi.encodePacked(_account, _market, _isLong));
         Position storage position = positions[key];
         require(position.size > 0, "Vault: empty position");
         require(position.size >= _sizeDelta, "Vault: invalid position size");
@@ -461,7 +444,7 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
             uint256 reserveDelta = (position.reserveAmount * _sizeDelta) /
                 position.size;
             position.reserveAmount -= reserveDelta;
-            decreaseReservedAmount(_collateralToken, reserveDelta);
+            decreaseReservedAmount(_market, reserveDelta);
         }
 
         uint256 markPrice = _isLong
@@ -470,7 +453,6 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
 
         uint256 usdOut = adjustCollateral(
             key,
-            _collateralToken,
             _market,
             _collateralDelta,
             _sizeDelta,
@@ -491,7 +473,6 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
             emit DecreasePosition(
                 key,
                 _account,
-                _collateralToken,
                 _market,
                 _collateralDelta,
                 _sizeDelta,
@@ -512,7 +493,6 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
             emit DecreasePosition(
                 key,
                 _account,
-                _collateralToken,
                 _market,
                 _collateralDelta,
                 _sizeDelta,
@@ -534,49 +514,42 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
 
         if (usdOut > 0) {
             if (_isLong) {
-                decreasePoolAmount(_collateralToken, usdOut);
+                decreasePoolAmount(_market, usdOut);
             }
-            doTransferOut(_collateralToken, _account, usdOut);
+            doTransferOut(_market, _account, usdOut);
         }
     }
 
     /// @notice liquidate position
     /// @param _account address of account decrease position
-    /// @param _collateralToken address of collateral token
     /// @param _market address of market
     /// @param _isLong long or short position
     function liquidatePosition(
         address _account,
-        address _collateralToken,
         address _market,
         bool _isLong
     ) external nonReentrant {
         refreshCumulativeFundingRate(_market);
-        bytes32 key = keccak256(
-            abi.encodePacked(_account, _collateralToken, _market, _isLong)
-        );
+        bytes32 key = keccak256(abi.encodePacked(_account, _market, _isLong));
         Position storage position = positions[key];
         require(position.size > 0, "Vault: empty position");
 
         bool allowed = liquidatePositionAllowed(key, _market, _isLong, false);
         require(allowed, "Vault: position cannot be liquidated");
 
-        decreaseReservedAmount(_collateralToken, position.reserveAmount);
+        decreaseReservedAmount(_market, position.reserveAmount);
 
         uint256 markPrice = _isLong
             ? getMinPrice(_market)
             : getMaxPrice(_market);
 
         if (_isLong) {
-            decreaseGuaranteedUsd(
-                _collateralToken,
-                position.size - position.collateral
-            );
+            decreaseGuaranteedUsd(_market, position.size - position.collateral);
         }
 
         if (!_isLong) {
             decreaseGlobalShortSize(_market, position.size);
-            increasePoolAmount(_collateralToken, position.collateral);
+            increasePoolAmount(_market, position.collateral);
         }
 
         delete positions[key];
@@ -584,7 +557,6 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
         emit LiquidatePosition(
             key,
             _account,
-            _collateralToken,
             _market,
             _isLong,
             position.size,
@@ -599,7 +571,6 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
 
     function adjustCollateral(
         bytes32 key,
-        address _collateralToken,
         address _market,
         uint256 _collateralDelta,
         uint256 _sizeDelta,
@@ -632,12 +603,8 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
 
             // pay out realised profits from the pool amount for short positions
             if (!_isLong) {
-                uint256 tokenAmount = usdToToken(
-                    _collateralToken,
-                    adjustedDelta,
-                    false
-                );
-                decreasePoolAmount(_collateralToken, tokenAmount);
+                uint256 tokenAmount = usdToToken(_market, adjustedDelta, false);
+                decreasePoolAmount(_market, tokenAmount);
             }
         }
 
@@ -650,12 +617,8 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
             // realised losses for long positions are not transferred here as
             // increasePoolAmount was already called in increasePosition for longs
             if (!_isLong) {
-                uint256 tokenAmount = usdToToken(
-                    _collateralToken,
-                    adjustedDelta,
-                    false
-                );
-                increasePoolAmount(_collateralToken, tokenAmount);
+                uint256 tokenAmount = usdToToken(_market, adjustedDelta, false);
+                increasePoolAmount(_market, tokenAmount);
             }
         }
 
@@ -782,7 +745,6 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
     event IncreasePosition(
         bytes32 key,
         address account,
-        address collateralToken,
         address market,
         uint256 collateralDelta,
         uint256 sizeDelta,
@@ -792,7 +754,6 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
     event DecreasePosition(
         bytes32 key,
         address account,
-        address collateralToken,
         address market,
         uint256 collateralDelta,
         uint256 sizeDelta,
@@ -821,7 +782,6 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
     event LiquidatePosition(
         bytes32 key,
         address account,
-        address collateralToken,
         address market,
         bool isLong,
         uint256 size,

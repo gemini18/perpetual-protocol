@@ -9,7 +9,6 @@ interface IVault {
 
     function increasePosition(
         address _account,
-        address _collateralToken,
         address _market,
         uint256 _dollarIn,
         uint256 _sizeDelta,
@@ -18,7 +17,6 @@ interface IVault {
 
     function decreasePosition(
         address _account,
-        address _collateralToken,
         address _market,
         uint256 _collateralDelta,
         uint256 _sizeDelta,

@@ -12,7 +12,7 @@ contract OrderBook is Ownable, Pausable, ReentrancyGuard {
 
     struct IncreaseOrder {
         address account;
-        address token;
+        address market;
         uint256 amount;
         uint256 sizeDelta;
         bool isLong;
@@ -22,7 +22,7 @@ contract OrderBook is Ownable, Pausable, ReentrancyGuard {
 
     struct DecreaseOrder {
         address account;
-        address token;
+        address market;
         uint256 collateralDelta;
         uint256 sizeDelta;
         bool isLong;
@@ -74,13 +74,13 @@ contract OrderBook is Ownable, Pausable, ReentrancyGuard {
     function validatePositionOrderPrice(
         bool _triggerAboveThreshold,
         uint256 _triggerPrice,
-        address _indexToken,
+        address _market,
         bool _maximizePrice,
         bool _raise
     ) public view returns (uint256, bool) {
         uint256 currentPrice = _maximizePrice
-            ? IVault(vault).getMaxPrice(_indexToken)
-            : IVault(vault).getMinPrice(_indexToken);
+            ? IVault(vault).getMaxPrice(_market)
+            : IVault(vault).getMinPrice(_market);
         bool isPriceValid = _triggerAboveThreshold
             ? currentPrice >= _triggerPrice
             : currentPrice <= _triggerPrice;
@@ -93,23 +93,22 @@ contract OrderBook is Ownable, Pausable, ReentrancyGuard {
     /* ========== MUTATIVE FUNCTIONS ========== */
 
     function createIncreaseOrder(
-        address _token,
+        address _market,
         uint256 _amountIn,
         uint256 _sizeDelta,
         bool _isLong,
         uint256 _triggerPrice,
         bool _triggerAboveThreshold
     ) external nonReentrant whenNotPaused {
-        address dollar = IVault(vault).dollar();
         address _account = msg.sender;
-        IERC20(dollar).safeTransferFrom(_account, address(this), _amountIn);
+        IERC20(_market).safeTransferFrom(_account, address(this), _amountIn);
 
         uint256 _index = increaseOrdersIndex[_account] + 1;
         increaseOrdersIndex[_account] = _index;
 
         IncreaseOrder memory order = IncreaseOrder(
             _account,
-            _token,
+            _market,
             _amountIn,
             _sizeDelta,
             _isLong,
@@ -121,7 +120,7 @@ contract OrderBook is Ownable, Pausable, ReentrancyGuard {
         emit CreateIncreaseOrder(
             _account,
             _index,
-            _token,
+            _market,
             _amountIn,
             _sizeDelta,
             _isLong,
@@ -157,14 +156,13 @@ contract OrderBook is Ownable, Pausable, ReentrancyGuard {
         require(order.account != address(0), "OrderBook: non-existent order");
 
         delete increaseOrders[msg.sender][_orderIndex];
-        address dollar = IVault(vault).dollar();
 
-        IERC20(dollar).safeTransfer(msg.sender, order.amount);
+        IERC20(order.market).safeTransfer(msg.sender, order.amount);
 
         emit CancelIncreaseOrder(
             order.account,
             _orderIndex,
-            order.token,
+            order.market,
             order.amount,
             order.sizeDelta,
             order.isLong,
@@ -186,20 +184,19 @@ contract OrderBook is Ownable, Pausable, ReentrancyGuard {
         validatePositionOrderPrice(
             order.triggerAboveThreshold,
             order.triggerPrice,
-            order.token,
+            order.market,
             order.isLong,
             true
         );
 
         delete increaseOrders[_account][_orderIndex];
 
-        address dollar = IVault(vault).dollar();
-        IERC20(dollar).safeApprove(vault, 0);
-        IERC20(dollar).safeApprove(vault, order.amount);
+        IERC20(order.market).safeApprove(vault, 0);
+        IERC20(order.market).safeApprove(vault, order.amount);
 
         IVault(vault).increasePosition(
             order.account,
-            order.token,
+            order.market,
             order.amount,
             order.sizeDelta,
             order.isLong
@@ -208,7 +205,7 @@ contract OrderBook is Ownable, Pausable, ReentrancyGuard {
         emit ExecuteIncreaseOrder(
             order.account,
             _orderIndex,
-            order.token,
+            order.market,
             order.amount,
             order.sizeDelta,
             order.isLong,
@@ -218,7 +215,7 @@ contract OrderBook is Ownable, Pausable, ReentrancyGuard {
     }
 
     function createDecreaseOrder(
-        address _token,
+        address _market,
         uint256 _sizeDelta,
         uint256 _collateralDelta,
         bool _isLong,
@@ -230,7 +227,7 @@ contract OrderBook is Ownable, Pausable, ReentrancyGuard {
         decreaseOrdersIndex[_account] = _index;
         DecreaseOrder memory order = DecreaseOrder(
             _account,
-            _token,
+            _market,
             _collateralDelta,
             _sizeDelta,
             _isLong,
@@ -242,7 +239,7 @@ contract OrderBook is Ownable, Pausable, ReentrancyGuard {
         emit CreateDecreaseOrder(
             _account,
             _index,
-            _token,
+            _market,
             _collateralDelta,
             _sizeDelta,
             _isLong,
@@ -262,7 +259,7 @@ contract OrderBook is Ownable, Pausable, ReentrancyGuard {
         validatePositionOrderPrice(
             order.triggerAboveThreshold,
             order.triggerPrice,
-            order.token,
+            order.market,
             !order.isLong,
             true
         );
@@ -271,7 +268,7 @@ contract OrderBook is Ownable, Pausable, ReentrancyGuard {
 
         IVault(vault).decreasePosition(
             order.account,
-            order.token,
+            order.market,
             order.collateralDelta,
             order.sizeDelta,
             order.isLong
@@ -280,7 +277,7 @@ contract OrderBook is Ownable, Pausable, ReentrancyGuard {
         emit ExecuteDecreaseOrder(
             order.account,
             _orderIndex,
-            order.token,
+            order.market,
             order.collateralDelta,
             order.sizeDelta,
             order.isLong,
@@ -298,7 +295,7 @@ contract OrderBook is Ownable, Pausable, ReentrancyGuard {
         emit CancelDecreaseOrder(
             order.account,
             _orderIndex,
-            order.token,
+            order.market,
             order.collateralDelta,
             order.sizeDelta,
             order.isLong,
@@ -337,7 +334,7 @@ contract OrderBook is Ownable, Pausable, ReentrancyGuard {
     event CreateIncreaseOrder(
         address indexed account,
         uint256 orderIndex,
-        address token,
+        address market,
         uint256 amount,
         uint256 sizeDelta,
         bool isLong,
@@ -354,7 +351,7 @@ contract OrderBook is Ownable, Pausable, ReentrancyGuard {
     event CancelIncreaseOrder(
         address indexed account,
         uint256 orderIndex,
-        address token,
+        address market,
         uint256 amount,
         uint256 sizeDelta,
         bool isLong,
@@ -364,7 +361,7 @@ contract OrderBook is Ownable, Pausable, ReentrancyGuard {
     event ExecuteIncreaseOrder(
         address indexed account,
         uint256 orderIndex,
-        address token,
+        address market,
         uint256 amount,
         uint256 sizeDelta,
         bool isLong,
@@ -374,7 +371,7 @@ contract OrderBook is Ownable, Pausable, ReentrancyGuard {
     event CreateDecreaseOrder(
         address indexed account,
         uint256 orderIndex,
-        address token,
+        address market,
         uint256 collateralDelta,
         uint256 sizeDelta,
         bool isLong,
@@ -394,7 +391,7 @@ contract OrderBook is Ownable, Pausable, ReentrancyGuard {
     event CancelDecreaseOrder(
         address indexed account,
         uint256 orderIndex,
-        address token,
+        address market,
         uint256 collateralDelta,
         uint256 sizeDelta,
         bool isLong,
