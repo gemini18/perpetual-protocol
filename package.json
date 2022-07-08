@@ -1,7 +1,7 @@
 {
-  "name": "perpetual-protocol",
+  "name": "chai-perpetual",
   "version": "1.0.0",
-  "description": "Protocol Perpetual",
+  "description": "Chai Protocol Perpetual",
   "scripts": {
     "test": "hardhat test",
     "hardhat": "hardhat",
@@ -10,10 +10,11 @@
     "dev": "hardhat node"
   },
   "keywords": [
-    "protocol",
+    "chai",
     "perpetual",
     "solidity"
   ],
+  "author": "Chai Protocol",
   "license": "ISC",
   "devDependencies": {
     "@nomiclabs/hardhat-ethers": "^2.0.6",

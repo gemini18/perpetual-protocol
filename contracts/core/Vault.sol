@@ -19,8 +19,8 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
 
     /* ========== MODIFIERS ========== */
 
-    modifier onlySupportMarkets(address token) {
-        require(markets[token].isListed, "Vault: onlySupportMarkets");
+    modifier onlyWhitelistedTokens(address token) {
+        require(whitelistedTokens[token], "Vault: onlyWhitelistedTokens");
         _;
     }
 
@@ -33,10 +33,12 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
 
     constructor(
         address _weth,
+        address _dollar,
         address _usdg,
         address _priceFeed
     ) {
         weth = _weth;
+        dollar = _dollar;
         usdg = _usdg;
         priceFeed = _priceFeed;
     }
@@ -55,17 +57,9 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
         emit SetPlugin(plugin);
     }
 
-    function supportMarket(address market) external onlyOwner {
-        require(!markets[market].isListed, "Vault: Market already listed");
-        markets[market] = Market({isListed: true});
-        for (uint256 i = 0; i < allMarkets.length; i++) {
-            require(allMarkets[i] != market, "market already added");
-        }
-        allMarkets.push(market);
-
-        // validate price feed
-        getMaxPrice(market);
-        emit MarketListed(market);
+    function setWhitelistedToken(address token) external onlyOwner {
+        whitelistedTokens[token] = true;
+        emit SetWhitelistedToken(token);
     }
 
     function pause() external onlyOwner {
@@ -79,15 +73,12 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
     /* ========== PUBLIC FUNCTIONS ========== */
 
     /// @notice Update cumulative fundingRate
-    function refreshCumulativeFundingRate(address _market) public {
+    function refreshCumulativeFundingRate() public {
         if (
-            block.timestamp - lastRefreshFundingRateTimestamp[_market] <
-            FUNDING_INTERVAL
+            block.timestamp - lastRefreshFundingRateTimestamp < FUNDING_INTERVAL
         ) return;
         uint256 intervals = (block.timestamp -
-            lastRefreshFundingRateTimestamp[_market]) / FUNDING_INTERVAL;
-        uint256 poolAmount = poolAmounts[_market];
-        uint256 reservedAmount = reservedAmounts[_market];
+            lastRefreshFundingRateTimestamp) / FUNDING_INTERVAL;
         if (poolAmount == 0) {
             cumulativeFundingRate = 0;
         } else {
@@ -96,7 +87,7 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
                 poolAmount;
         }
 
-        lastRefreshFundingRateTimestamp[_market] = block.timestamp;
+        lastRefreshFundingRateTimestamp = block.timestamp;
     }
 
     /* ========== VIEWS ========== */
@@ -118,7 +109,7 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
     /// @param _size Size of position.
     /// @param _entryPrice Entry price of position.
     /// @param _isLong long or short position
-    function getPositionDelta(
+    function getDelta(
         address _token,
         uint256 _size,
         uint256 _entryPrice,
@@ -139,11 +130,11 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
 
     /// @notice check liquidate position
     /// @param _key key of position
-    /// @param _market Address of market.
+    /// @param _token Address of token.
     /// @param _isLong long or short position
     function liquidatePositionAllowed(
         bytes32 _key,
-        address _market,
+        address _token,
         bool _isLong,
         bool _raise
     ) public view returns (bool allowed) {
@@ -153,14 +144,14 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
             if (_raise) revert("Vault: non-existent position");
         }
 
-        (bool hasProfit, uint256 positionDelta) = getPositionDelta(
-            _market,
+        (bool hasProfit, uint256 delta) = getDelta(
+            _token,
             position.size,
             position.entryPrice,
             _isLong
         );
 
-        if (!hasProfit && position.collateral <= positionDelta) {
+        if (!hasProfit && position.collateral <= delta) {
             allowed = true;
             if (_raise) revert("Vault: losses exceed collateral");
         }
@@ -168,65 +159,30 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
         uint256 remainingCollateral = position.collateral;
 
         if (!hasProfit) {
-            remainingCollateral = position.collateral - positionDelta;
+            remainingCollateral = position.collateral - delta;
         }
-    }
 
-    /// @notice caculate token amount to usd
-    /// @param _token address of token
-    /// @param _amount amount of token
-    /// @param _maximise min or max price
-    function tokenToUsd(
-        address _token,
-        uint256 _amount,
-        bool _maximise
-    ) public view returns (uint256) {
-        if (_amount == 0) {
-            return 0;
+        if (remainingCollateral * maxLeverage < position.size * PRECISION) {
+            allowed = true;
+            if (_raise) revert("Vault: max leverage exceeded");
         }
-        uint256 price = _maximise ? getMaxPrice(_token) : getMinPrice(_token);
-        return (_amount * price) / PRICE_PRECISION;
-    }
-
-    /// @notice caculate usd to token amount
-    /// @param _token address of token
-    /// @param _amount amount in usd
-    /// @param _maximise min or max price
-    function usdToToken(
-        address _token,
-        uint256 _amount,
-        bool _maximise
-    ) public view returns (uint256) {
-        if (_amount == 0) {
-            return 0;
-        }
-        uint256 price = _maximise ? getMaxPrice(_token) : getMinPrice(_token);
-        return (_amount * PRICE_PRECISION) / price;
     }
 
     /* ========== MUTATIVE FUNCTIONS ========== */
 
-    /// @notice buy usdg from token
-    /// @param _token address of token
-    /// @param _amount amount of token
-    function buyUSDG(address _token, uint256 _amount)
-        external
-        onlySupportMarkets(_token)
-        nonReentrant
-        returns (uint256)
-    {
-        refreshCumulativeFundingRate(_token);
-        uint256 actualAmount = doTransferIn(_token, msg.sender, _amount);
+    function buyUSDG(uint256 _amount) external nonReentrant returns (uint256) {
+        refreshCumulativeFundingRate();
+        uint256 actualAmount = doTransferIn(dollar, msg.sender, _amount);
 
         uint256 missingDecimals = 18 +
             IUSDG(usdg).decimals() -
-            ERC20(_token).decimals();
+            ERC20(dollar).decimals();
 
         uint256 usdgAmount = (actualAmount * 10**missingDecimals) /
             PRICE_PRECISION;
         require(usdgAmount > 0, "Vault: invalid usdgAmount");
 
-        increasePoolAmount(_token, actualAmount);
+        increasePoolAmount(actualAmount);
 
         IUSDG(usdg).mint(usdgAmount);
 
@@ -235,48 +191,34 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
         return usdgAmount;
     }
 
-    /// @notice sell usdg to token
-    /// @param _token address of token
-    /// @param _amount amount of token
-    function sellUSDG(address _token, uint256 _amount)
-        external
-        onlySupportMarkets(_token)
-        nonReentrant
-        returns (uint256)
-    {
+    function sellUSDG(uint256 _amount) external nonReentrant returns (uint256) {
         address receiver = msg.sender;
         uint256 actualAmount = doTransferIn(usdg, receiver, _amount);
         require(actualAmount > 0, "Vault: invalid usdgAmount");
 
-        refreshCumulativeFundingRate(_token);
+        refreshCumulativeFundingRate();
 
-        decreasePoolAmount(_token, actualAmount);
+        decreasePoolAmount(actualAmount);
 
         IUSDG(usdg).burn(address(this), actualAmount);
 
         uint256 missingDecimals = 18 +
             IUSDG(usdg).decimals() -
-            ERC20(_token).decimals();
+            ERC20(dollar).decimals();
 
         uint256 amountOut = (actualAmount * PRICE_PRECISION) /
             10**missingDecimals;
 
-        doTransferOut(_token, receiver, amountOut);
+        doTransferOut(dollar, receiver, amountOut);
 
         emit SellUSDG(receiver, actualAmount);
 
         return actualAmount;
     }
 
-    /// @notice increase position
-    /// @param _account address of account increase position
-    /// @param _market address of market
-    /// @param _amountIn amount of collateral token increase position
-    /// @param _sizeDelta size delta in usd to increase position
-    /// @param _isLong long or short position
     function increasePosition(
         address _account,
-        address _market,
+        address _token,
         uint256 _amountIn,
         uint256 _sizeDelta,
         bool _isLong
@@ -285,25 +227,23 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
         nonReentrant
         whenNotPaused
         onlyPlugins
-        onlySupportMarkets(_market)
+        onlyWhitelistedTokens(_token)
     {
-        refreshCumulativeFundingRate(_market);
-        bytes32 key = keccak256(abi.encodePacked(_account, _market, _isLong));
+        bytes32 key = keccak256(abi.encodePacked(_account, _token, _isLong));
         Position storage position = positions[key];
+        refreshCumulativeFundingRate();
 
-        uint256 actualAmount = doTransferIn(_market, msg.sender, _amountIn);
+        uint256 actualAmount = doTransferIn(dollar, msg.sender, _amountIn);
 
-        uint256 markPrice = _isLong
-            ? getMaxPrice(_market)
-            : getMinPrice(_market);
+        uint256 markPrice = _isLong ? getMaxPrice(_token) : getMinPrice(_token);
 
         // set position entryPrice if no position exist
         if (position.size == 0) {
             position.entryPrice = markPrice;
         }
 
-        (bool hasProfit, uint256 positionDelta) = getPositionDelta(
-            _market,
+        (bool hasProfit, uint256 delta) = getDelta(
+            _token,
             position.size,
             position.entryPrice,
             _isLong
@@ -315,13 +255,9 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
             uint256 denom;
             uint256 nextSize = position.size + _sizeDelta;
             if (_isLong) {
-                denom = hasProfit
-                    ? nextSize + positionDelta
-                    : nextSize - positionDelta;
+                denom = hasProfit ? nextSize + delta : nextSize - delta;
             } else {
-                denom = hasProfit
-                    ? nextSize - positionDelta
-                    : nextSize + positionDelta;
+                denom = hasProfit ? nextSize - delta : nextSize + delta;
             }
             position.entryPrice = (markPrice * nextSize) / denom;
         }
@@ -331,69 +267,31 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
         // lastIncreasedTime = block.timestamp
         position.entryFundingRate = cumulativeFundingRate;
         position.size += _sizeDelta;
-        position.lastIncreasedTime = block.timestamp;
-        // calculte collateral of position: collateral = collateral + actualAmountUsd;
-        uint256 actualAmountUsd = tokenToUsd(_market, actualAmount, false);
-        position.collateral += actualAmountUsd;
-
         require(position.size > 0, "Vault: invalid position size");
+
+        // calculte collateral of position: collateral = collateral + actualAmount;
+        position.collateral += actualAmount;
         require(
             position.size >= position.collateral,
             "Vault: size must be more than collateral"
         );
 
         // validate liquidation
-        liquidatePositionAllowed(key, _market, _isLong, true);
+        liquidatePositionAllowed(key, _token, _isLong, true);
 
-        // update reserveAmount = reserveAmount + reserveDelta
-        // reserve tokens to pay profits on the position
-        uint256 reserveDelta = usdToToken(_market, _sizeDelta, true);
-        position.reserveAmount += reserveDelta;
-        increaseReservedAmount(_market, _sizeDelta);
+        // update reserveAmount = reserveAmount + _sizeDelta
+        position.reserveAmount += _sizeDelta;
+        increaseReservedAmount(_sizeDelta);
 
         if (_isLong) {
-            // guaranteedUsd stores the sum of (position.size - position.collateral) for all positions
-            // if a fee is charged on the collateral then guaranteedUsd should be increased by that fee amount
-            // since (position.size - position.collateral) would have increased by `fee`
-            increaseGuaranteedUsd(_market, _sizeDelta);
-            decreaseGuaranteedUsd(_market, actualAmountUsd);
             // treat the deposited collateral as part of the pool
-            increasePoolAmount(_market, actualAmount);
-        } else {
-            if (globalShortSizes[_market] == 0) {
-                globalShortAveragePrices[_market] = markPrice;
-            } else {
-                uint256 globalShortSize = globalShortSizes[_market];
-                uint256 globalShortAveragePrice = globalShortAveragePrices[
-                    _market
-                ];
-
-                uint256 globalShortPriceDelta = globalShortAveragePrice >
-                    markPrice
-                    ? globalShortAveragePrice - markPrice
-                    : markPrice - globalShortAveragePrice;
-
-                uint256 globalShortSizeDelta = (globalShortSize *
-                    globalShortPriceDelta) / globalShortAveragePrice;
-
-                uint256 nextGlobalShortSize = globalShortSize + _sizeDelta;
-
-                uint256 denom = globalShortAveragePrice > markPrice
-                    ? nextGlobalShortSize - globalShortSizeDelta
-                    : nextGlobalShortSize + globalShortSizeDelta;
-
-                globalShortAveragePrice =
-                    (markPrice * nextGlobalShortSize) /
-                    denom;
-            }
-
-            increaseGlobalShortSize(_market, _sizeDelta);
+            increasePoolAmount(actualAmount);
         }
 
         emit IncreasePosition(
             key,
             _account,
-            _market,
+            _token,
             actualAmount,
             _sizeDelta,
             _isLong,
@@ -411,15 +309,9 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
         );
     }
 
-    /// @notice decrease position
-    /// @param _account address of account decrease position
-    /// @param _market address of market
-    /// @param _collateralDelta amount of collateral token decrease position
-    /// @param _sizeDelta size delta in usd to decrease position
-    /// @param _isLong long or short position
     function decreasePosition(
         address _account,
-        address _market,
+        address _token,
         uint256 _collateralDelta,
         uint256 _sizeDelta,
         bool _isLong
@@ -428,10 +320,10 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
         nonReentrant
         whenNotPaused
         onlyPlugins
-        onlySupportMarkets(_market)
+        onlyWhitelistedTokens(_token)
     {
-        refreshCumulativeFundingRate(_market);
-        bytes32 key = keccak256(abi.encodePacked(_account, _market, _isLong));
+        refreshCumulativeFundingRate();
+        bytes32 key = keccak256(abi.encodePacked(_account, _token, _isLong));
         Position storage position = positions[key];
         require(position.size > 0, "Vault: empty position");
         require(position.size >= _sizeDelta, "Vault: invalid position size");
@@ -439,21 +331,18 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
             position.collateral > _collateralDelta,
             "Vault: position collateral exceeded"
         );
-        // scrop variables to avoid stack too deep errors
         {
             uint256 reserveDelta = (position.reserveAmount * _sizeDelta) /
                 position.size;
             position.reserveAmount -= reserveDelta;
-            decreaseReservedAmount(_market, reserveDelta);
+            decreaseReservedAmount(reserveDelta);
         }
 
-        uint256 markPrice = _isLong
-            ? getMinPrice(_market)
-            : getMaxPrice(_market);
+        uint256 markPrice = _isLong ? getMinPrice(_token) : getMaxPrice(_token);
 
         uint256 usdOut = adjustCollateral(
             key,
-            _market,
+            _token,
             _collateralDelta,
             _sizeDelta,
             _isLong
@@ -468,12 +357,12 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
                 "Vault: Size must be more than collateral"
             );
             // validate liquidation
-            liquidatePositionAllowed(key, _market, _isLong, true);
+            liquidatePositionAllowed(key, _token, _isLong, true);
 
             emit DecreasePosition(
                 key,
                 _account,
-                _market,
+                _token,
                 _collateralDelta,
                 _sizeDelta,
                 _isLong,
@@ -493,7 +382,7 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
             emit DecreasePosition(
                 key,
                 _account,
-                _market,
+                _token,
                 _collateralDelta,
                 _sizeDelta,
                 _isLong,
@@ -514,42 +403,31 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
 
         if (usdOut > 0) {
             if (_isLong) {
-                decreasePoolAmount(_market, usdOut);
+                decreasePoolAmount(usdOut);
             }
-            doTransferOut(_market, _account, usdOut);
+            doTransferOut(dollar, _account, usdOut);
         }
     }
 
-    /// @notice liquidate position
-    /// @param _account address of account decrease position
-    /// @param _market address of market
-    /// @param _isLong long or short position
     function liquidatePosition(
         address _account,
-        address _market,
+        address _token,
         bool _isLong
     ) external nonReentrant {
-        refreshCumulativeFundingRate(_market);
-        bytes32 key = keccak256(abi.encodePacked(_account, _market, _isLong));
+        refreshCumulativeFundingRate();
+        bytes32 key = keccak256(abi.encodePacked(_account, _token, _isLong));
         Position storage position = positions[key];
         require(position.size > 0, "Vault: empty position");
 
-        bool allowed = liquidatePositionAllowed(key, _market, _isLong, false);
+        bool allowed = liquidatePositionAllowed(key, _token, _isLong, false);
         require(allowed, "Vault: position cannot be liquidated");
 
-        decreaseReservedAmount(_market, position.reserveAmount);
+        decreaseReservedAmount(position.reserveAmount);
 
-        uint256 markPrice = _isLong
-            ? getMinPrice(_market)
-            : getMaxPrice(_market);
-
-        if (_isLong) {
-            decreaseGuaranteedUsd(_market, position.size - position.collateral);
-        }
+        uint256 markPrice = _isLong ? getMinPrice(_token) : getMaxPrice(_token);
 
         if (!_isLong) {
-            decreaseGlobalShortSize(_market, position.size);
-            increasePoolAmount(_market, position.collateral);
+            increasePoolAmount(position.collateral);
         }
 
         delete positions[key];
@@ -557,7 +435,7 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
         emit LiquidatePosition(
             key,
             _account,
-            _market,
+            _token,
             _isLong,
             position.size,
             position.collateral,
@@ -571,7 +449,7 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
 
     function adjustCollateral(
         bytes32 key,
-        address _market,
+        address _token,
         uint256 _collateralDelta,
         uint256 _sizeDelta,
         bool _isLong
@@ -583,8 +461,8 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
 
         // scope variables to avoid stack too deep errors
         {
-            (bool _hasProfit, uint256 delta) = getPositionDelta(
-                _market,
+            (bool _hasProfit, uint256 delta) = getDelta(
+                _token,
                 position.size,
                 position.entryPrice,
                 _isLong
@@ -603,8 +481,7 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
 
             // pay out realised profits from the pool amount for short positions
             if (!_isLong) {
-                uint256 tokenAmount = usdToToken(_market, adjustedDelta, false);
-                decreasePoolAmount(_market, tokenAmount);
+                decreasePoolAmount(adjustedDelta);
             }
         }
 
@@ -615,10 +492,9 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
 
             // transfer realised losses to the pool for short positions
             // realised losses for long positions are not transferred here as
-            // increasePoolAmount was already called in increasePosition for longs
+            // _increasePoolAmount was already called in increasePosition for longs
             if (!_isLong) {
-                uint256 tokenAmount = usdToToken(_market, adjustedDelta, false);
-                increasePoolAmount(_market, tokenAmount);
+                increasePoolAmount(adjustedDelta);
             }
         }
 
@@ -640,74 +516,29 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
         return usdOut;
     }
 
-    function increaseReservedAmount(address _token, uint256 _amount) private {
-        reservedAmounts[_token] += _amount;
-        require(
-            reservedAmounts[_token] <= poolAmounts[_token],
-            "Vault: reserve exceeds pool"
-        );
-        emit IncreaseReservedAmount(_token, _amount);
+    function increaseReservedAmount(uint256 _amount) private {
+        reservedAmount += _amount;
+        require(reservedAmount <= poolAmount, "Vault: reserve exceeds pool");
+        emit IncreaseReservedAmount(_amount);
     }
 
-    function decreaseReservedAmount(address _token, uint256 _amount) private {
-        require(
-            reservedAmounts[_token] >= _amount,
-            "Vault: insufficient reserve"
-        );
-        reservedAmounts[_token] -= _amount;
-        emit DecreaseReservedAmount(_token, _amount);
+    function decreaseReservedAmount(uint256 _amount) private {
+        reservedAmount -= _amount;
+        emit DecreaseReservedAmount(_amount);
     }
 
-    function increasePoolAmount(address _token, uint256 _amount) private {
-        poolAmounts[_token] += _amount;
-        uint256 balance = IERC20(_token).balanceOf(address(this));
-        require(poolAmounts[_token] <= balance, "Vault: pool exceeds balance");
-        emit IncreasePoolAmount(_token, _amount);
+    function increasePoolAmount(uint256 _amount) private {
+        poolAmount += _amount;
+        uint256 balance = IERC20(dollar).balanceOf(address(this));
+        require(poolAmount <= balance, "Vault: pool exceeds balance");
+        emit IncreasePoolAmount(_amount);
     }
 
-    function decreasePoolAmount(address _token, uint256 _amount) private {
-        require(
-            poolAmounts[_token] <= poolAmounts[_token],
-            "Vault: reserve exceeds pool"
-        );
-        poolAmounts[_token] -= _amount;
-        require(
-            reservedAmounts[_token] <= poolAmounts[_token],
-            "Vault: reserve exceeds pool"
-        );
-        emit DecreasePoolAmount(_token, _amount);
-    }
-
-    function increaseGuaranteedUsd(address _token, uint256 _usdAmount) private {
-        guaranteedUsd[_token] += _usdAmount;
-        emit IncreaseGuaranteedUsd(_token, _usdAmount);
-    }
-
-    function decreaseGuaranteedUsd(address _token, uint256 _usdAmount) private {
-        guaranteedUsd[_token] -= _usdAmount;
-        emit DecreaseGuaranteedUsd(_token, _usdAmount);
-    }
-
-    function increaseGlobalShortSize(address _token, uint256 _amount) private {
-        globalShortSizes[_token] += _amount;
-
-        uint256 maxSize = maxGlobalShortSizes[_token];
-        if (maxSize != 0) {
-            require(
-                globalShortSizes[_token] <= maxSize,
-                "Vault: max shorts exceeded"
-            );
-        }
-    }
-
-    function decreaseGlobalShortSize(address _token, uint256 _amount) private {
-        uint256 size = globalShortSizes[_token];
-        if (_amount > size) {
-            globalShortSizes[_token] = 0;
-            return;
-        }
-
-        globalShortSizes[_token] -= _amount;
+    function decreasePoolAmount(uint256 _amount) private {
+        require(poolAmount >= _amount, "Vault: poolAmount exceeded");
+        poolAmount -= _amount;
+        require(reservedAmount <= poolAmount, "Vault: reserve exceeds pool");
+        emit DecreasePoolAmount(_amount);
     }
 
     function doTransferIn(
@@ -735,17 +566,15 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
     /* ========== EVENTS ========== */
     event SetPlugin(address plugin);
     event SetErrors(string[] errors);
-    event MarketListed(address market);
-    event IncreaseReservedAmount(address market, uint256 amount);
-    event DecreaseReservedAmount(address market, uint256 amount);
-    event IncreasePoolAmount(address market, uint256 amount);
-    event DecreasePoolAmount(address market, uint256 amount);
-    event IncreaseGuaranteedUsd(address market, uint256 amount);
-    event DecreaseGuaranteedUsd(address market, uint256 amount);
+    event SetWhitelistedToken(address token);
+    event IncreaseReservedAmount(uint256 amount);
+    event DecreaseReservedAmount(uint256 amount);
+    event IncreasePoolAmount(uint256 amount);
+    event DecreasePoolAmount(uint256 amount);
     event IncreasePosition(
         bytes32 key,
         address account,
-        address market,
+        address token,
         uint256 collateralDelta,
         uint256 sizeDelta,
         bool isLong,
@@ -754,7 +583,7 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
     event DecreasePosition(
         bytes32 key,
         address account,
-        address market,
+        address token,
         uint256 collateralDelta,
         uint256 sizeDelta,
         bool isLong,
@@ -782,7 +611,7 @@ contract Vault is VaultStorage, Ownable, Pausable, ReentrancyGuard {
     event LiquidatePosition(
         bytes32 key,
         address account,
-        address market,
+        address token,
         bool isLong,
         uint256 size,
         uint256 collateral,

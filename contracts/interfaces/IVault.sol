@@ -3,13 +3,15 @@
 pragma solidity 0.8.4;
 
 interface IVault {
+    function dollar() external view returns (address);
+
     function getMaxPrice(address _token) external view returns (uint256);
 
     function getMinPrice(address _token) external view returns (uint256);
 
     function increasePosition(
         address _account,
-        address _market,
+        address _indexToken,
         uint256 _dollarIn,
         uint256 _sizeDelta,
         bool _isLong
@@ -17,7 +19,7 @@ interface IVault {
 
     function decreasePosition(
         address _account,
-        address _market,
+        address _token,
         uint256 _collateralDelta,
         uint256 _sizeDelta,
         bool _isLong
