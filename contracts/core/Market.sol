@@ -254,7 +254,6 @@ contract Market is Ownable, ReentrancyGuard, Pausable {
     /// @param _sizeDelta : Size of position.
     /// @param _isLong : long or short position.
     function createDecreasePosition(
-        address _collateralToken,
         address _market,
         uint256 _collateralDelta,
         uint256 _sizeDelta,
